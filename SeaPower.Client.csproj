@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-<PropertyGroup><TargetFramework>netstandard2.1</TargetFramework><LangVersion>12</LangVersion><EnableDefaultCompileItems>false</EnableDefaultCompileItems><GameManaged Condition="'$(GameManaged)' == ''">C:/Games/Sea_Power_8_3/Sea Power_Data/Managed</GameManaged></PropertyGroup>
+<PropertyGroup><TargetFramework>netstandard2.1</TargetFramework><LangVersion>12</LangVersion><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
 <ItemGroup><Compile Include="src/**/*.cs" /><ProjectReference Include="$(GatewayApiSource)/managed/Gateway.Api.csproj" /></ItemGroup>
 <ItemGroup>
 <Reference Include="Seapower-Scripts"><HintPath>$(GameManaged)/Seapower-Scripts.dll</HintPath><Private>false</Private></Reference>

@@ -18,14 +18,15 @@ public sealed class Provider {
  readonly ConcurrentQueue<byte[]> commands=new(), output=new();
  string session="";
  ulong version;
+ int queued;
  public Provider(IGameFacade game,string observer){this.game=game;this.observer=observer;thread=Thread.CurrentThread.ManagedThreadId;}
  void Main(){if(thread!=Thread.CurrentThread.ManagedThreadId)throw new InvalidOperationException("engine_thread_required");}
- public bool Enqueue(byte[] immutableBytes) { if(immutableBytes==null||immutableBytes.Length>65536||commands.Count>=64)return false;commands.Enqueue((byte[])immutableBytes.Clone());return true; }
+ public bool Enqueue(byte[] immutableBytes) { if(immutableBytes==null||immutableBytes.Length>65536)return false;if(Interlocked.Increment(ref queued)>64){Interlocked.Decrement(ref queued);return false;}commands.Enqueue((byte[])immutableBytes.Clone());return true; }
  public bool TryRead(out byte[] bytes)=>output.TryDequeue(out bytes);
  // Separate outgoing channels preserve canonical payload types without extra schema.
  public readonly ConcurrentQueue<byte[]> Results=new();
  void Result(OrderResult r){ledger[r.RequestId]=r;if(Results.Count<128)Results.Enqueue(r.ToByteArray());else throw new InvalidOperationException("status_backpressure");}
- public void Invalidate(){Main();session="";version=0;handles.Clear();ledger.Clear();movement.Clear();game.Reset();while(commands.TryDequeue(out _)){}while(output.TryDequeue(out _)){}while(Results.TryDequeue(out _)){}var w=new WorldSnapshot{Session=new Session{SchemaVersion=1,Ready=false}};output.Enqueue(w.ToByteArray());}
+ public void Invalidate(){Main();session="";version=0;handles.Clear();ledger.Clear();movement.Clear();game.Reset();while(commands.TryDequeue(out _)){Interlocked.Decrement(ref queued);}while(output.TryDequeue(out _)){}while(Results.TryDequeue(out _)){}var w=new WorldSnapshot{Session=new Session{SchemaVersion=1,Ready=false}};output.Enqueue(w.ToByteArray());}
  public byte[] Tick(){
   Main();if(!game.Ready){if(session!="")Invalidate();return null;}
   if(session=="")session=Guid.NewGuid().ToString("N");
@@ -35,6 +36,7 @@ public sealed class Provider {
   foreach(var u in units.Take(128))if(!handles.ContainsKey(u.Key))handles[u.Key]=Guid.NewGuid().ToString("N");
   // Process bounded commands before publishing a new version.
   for(int i=0;i<8&&commands.TryDequeue(out var bytes);++i){
+   Interlocked.Decrement(ref queued);
    OrderRequest r;try{r=OrderRequest.Parser.ParseFrom(bytes);}catch{continue;}
    Dispatch(r);
   }
@@ -86,4 +88,3 @@ public sealed class Provider {
  }
  public static double Distance(double la,double lo,double lb,double lob){double a=la*Math.PI/180,b=lb*Math.PI/180,x=(lb-la)*Math.PI/180,y=(lob-lo)*Math.PI/180;double h=Math.Sin(x/2)*Math.Sin(x/2)+Math.Cos(a)*Math.Cos(b)*Math.Sin(y/2)*Math.Sin(y/2);return 6371000*2*Math.Atan2(Math.Sqrt(h),Math.Sqrt(Math.Max(0,1-h)));}
 }
-

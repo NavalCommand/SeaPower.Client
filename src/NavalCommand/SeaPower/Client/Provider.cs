@@ -416,8 +416,24 @@ public sealed class Provider
 
     public static double Distance(double la, double lo, double lb, double lob)
     {
-        double a = la * Math.PI / 180, b = lb * Math.PI / 180, x = (lb - la) * Math.PI / 180, y = (lob - lo) * Math.PI / 180;
-        double h = Math.Sin(x / 2) * Math.Sin(x / 2) + Math.Cos(a) * Math.Cos(b) * Math.Sin(y / 2) * Math.Sin(y / 2);
-        return 6371000 * 2 * Math.Atan2(Math.Sqrt(h), Math.Sqrt(Math.Max(0, 1 - h)));
+        // Keep parameter names for callers that use named arguments.
+        double startLatitudeDegrees = la;
+        double startLongitudeDegrees = lo;
+        double endLatitudeDegrees = lb;
+        double endLongitudeDegrees = lob;
+        const double EarthRadiusMeters = 6_371_000;
+        const double DegreesPerHalfTurn = 180;
+        // Preserve multiplication/division order and near-antipodal handling from the
+        // original Haversine routine. No newer target-runtime math APIs are required.
+        double startLatitudeRadians = startLatitudeDegrees * Math.PI / DegreesPerHalfTurn;
+        double endLatitudeRadians = endLatitudeDegrees * Math.PI / DegreesPerHalfTurn;
+        double latitudeDifferenceRadians = (endLatitudeDegrees - startLatitudeDegrees) * Math.PI / DegreesPerHalfTurn;
+        double longitudeDifferenceRadians = (endLongitudeDegrees - startLongitudeDegrees) * Math.PI / DegreesPerHalfTurn;
+        double latitudeHaversineTerm = Math.Sin(latitudeDifferenceRadians / 2) * Math.Sin(latitudeDifferenceRadians / 2)
+    ;
+        double longitudeHaversineTerm = Math.Cos(startLatitudeRadians) * Math.Cos(endLatitudeRadians)
+            * Math.Sin(longitudeDifferenceRadians / 2) * Math.Sin(longitudeDifferenceRadians / 2);
+        double haversine = latitudeHaversineTerm + longitudeHaversineTerm;
+        return EarthRadiusMeters * 2 * Math.Atan2(Math.Sqrt(haversine), Math.Sqrt(Math.Max(0, 1 - haversine)));
     }
 }

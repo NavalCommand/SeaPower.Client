@@ -20,6 +20,7 @@ static class Program
 
     static void Main()
     {
+        DistanceTests.Run();
         var game = new FakeGameFacade();
         var provider = new Provider(game: game, observer: "observer");
         var view = WorldSnapshot.Parser.ParseFrom(provider.Tick());

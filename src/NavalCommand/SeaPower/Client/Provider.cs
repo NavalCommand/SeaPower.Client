@@ -63,7 +63,7 @@ public sealed class Provider {
   else if(u.Grounded){e.Availability=Availability.Unknown;e.Reason="grounded_launch_sequence_unverified";}
   else if(!u.Controllable){e.Availability=Availability.Blocked;e.Reason="uncontrollable";}
   else if(u.Formation){e.Availability=Availability.Unknown;e.Reason="formation_effects_unverified";}
-  else if(u.SelectedTask){e.Availability=Availability.Blocked;e.Reason="ui_task_selection_conflict";}
+  else if(u.SelectedTask){e.Availability=Availability.Blocked;e.Reason="native_task_selection_active";}
   return e;
  }
  void Dispatch(OrderRequest r){
@@ -88,3 +88,4 @@ public sealed class Provider {
  }
  public static double Distance(double la,double lo,double lb,double lob){double a=la*Math.PI/180,b=lb*Math.PI/180,x=(lb-la)*Math.PI/180,y=(lob-lo)*Math.PI/180;double h=Math.Sin(x/2)*Math.Sin(x/2)+Math.Cos(a)*Math.Cos(b)*Math.Sin(y/2)*Math.Sin(y/2);return 6371000*2*Math.Atan2(Math.Sqrt(h),Math.Sqrt(Math.Max(0,1-h)));}
 }
+

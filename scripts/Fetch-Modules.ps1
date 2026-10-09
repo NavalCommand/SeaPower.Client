@@ -8,10 +8,11 @@ foreach($entry in $entries){
  $url=$entry.url
  if($env:NC_REPOSITORY_BASE){$url=$env:NC_REPOSITORY_BASE.TrimEnd('/')+'/'+$entry.name}
  if(!(Test-Path "$target/.git")){git clone --no-checkout $url $target | Out-Null;if($LASTEXITCODE){throw "Fetch failed: $url"}}
+ git -C $target fetch $url $entry.revision | Out-Null
+ if($LASTEXITCODE){throw 'Pinned source fetch failed'}
  git -C $target checkout --detach $entry.revision | Out-Null
  if($LASTEXITCODE){throw "Pinned revision absent: $($entry.revision)"}
  if((git -C $target rev-parse HEAD) -ne $entry.revision){throw 'Pin mismatch'}
  $result[$entry.name]=[IO.Path]::GetFullPath($target)
 }
 return $result
-

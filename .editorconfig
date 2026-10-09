@@ -1,0 +1,14 @@
+# C# conventions only; C++ naming/indentation is governed by Docs/CodeStyle.xml.
+root = true
+
+[*.cs]
+indent_style = space
+indent_size = 4
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_members_in_object_initializers = true
+csharp_new_line_before_members_in_anonymous_types = true
+csharp_preserve_single_line_statements = false
+csharp_preserve_single_line_blocks = false

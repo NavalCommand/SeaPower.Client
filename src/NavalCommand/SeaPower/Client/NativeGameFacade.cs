@@ -5,12 +5,21 @@ using System.Threading;
 using SeaPower;
 
 namespace NavalCommand.SeaPower.Client;
+
 public sealed class NativeGameFacade : IGameFacade
 {
-    readonly Dictionary<ObjectBase, string> keys = new();
-    readonly Dictionary<string, ObjectBase> objects = new();
-    readonly Dictionary<int, string> tracks = new();
-    void Main()
+    private const double MetersPerNauticalMile = 1852.0;
+    private const double SecondsPerHour = 3600.0;
+    private const int MaximumUnitSamplesWithOverflow = 129;
+    private const int MaximumTrackSamples = 128;
+    private const int MaximumStockSamples = 12;
+    // This inspected game build uses this lower bound for side-local foreign contact keys.
+    private const int FirstForeignContactId = 7001;
+    private const int WaypointTelegraphSetting = 2;
+    readonly Dictionary<ObjectBase, string> unitKeys = new();
+    readonly Dictionary<string, ObjectBase> unitsByKey = new();
+    readonly Dictionary<int, string> trackHandles = new();
+    void AssertEngineThread()
     {
         if (Globals.mainThread != Thread.CurrentThread)
         {
@@ -22,8 +31,9 @@ public sealed class NativeGameFacade : IGameFacade
     {
         get
         {
-            Main();
-            return Singleton<GameMain>.InstanceExists() && Singleton<GameMain>.Instance._initialized && !Singleton<GameMain>.Instance._closing && Globals._playerTaskforce != null && Singleton<SceneCreator>.Instance.IsLoadingDone && !Singleton<LoadScreen>.Instance.cameraObject.enabled;
+            AssertEngineThread();
+            return Singleton<GameMain>.InstanceExists() && Singleton<GameMain>.Instance._initialized && !Singleton<GameMain>.Instance._closing
+                && Globals._playerTaskforce != null && Singleton<SceneCreator>.Instance.IsLoadingDone && !Singleton<LoadScreen>.Instance.cameraObject.enabled;
         }
     }
 
@@ -31,84 +41,93 @@ public sealed class NativeGameFacade : IGameFacade
     {
         get
         {
-            Main();
+            AssertEngineThread();
             return GameTime.missionElapsedTime;
         }
     }
 
     public void Reset()
     {
-        Main();
-        keys.Clear();
-        objects.Clear();
-        tracks.Clear();
+        AssertEngineThread();
+        unitKeys.Clear();
+        unitsByKey.Clear();
+        trackHandles.Clear();
     }
 
-    UnitSample Sample(ObjectBase u, string key)
+    UnitSample SampleUnit(ObjectBase nativeUnit, string unitKey)
     {
-        bool own = u != null && !u.IsDestroyed && u.UnitTaskforce.Value == Globals._playerTaskforce && Globals._playerTaskforce._taskforceUnits.Contains(u);
-        if (!own)
+        bool isOwnUnit = nativeUnit != null && !nativeUnit.IsDestroyed && nativeUnit.UnitTaskforce.Value == Globals._playerTaskforce
+            && Globals._playerTaskforce._taskforceUnits.Contains(nativeUnit);
+        if (!isOwnUnit)
         {
             return null;
         }
 
-        var state = u.StateMachine?.CurrentState;
+        var state = nativeUnit.StateMachine?.CurrentState;
         var stateName = state?.GetType().Name;
-        var s = new UnitSample
+        var sample = new UnitSample
         {
-            Key = key,
-            Name = u.name,
+            Key = unitKey,
+            Name = nativeUnit.name,
             Own = true,
-            Supported = u is Vessel || u is Aircraft || u is Helicopter,
-            Controllable = u.HasControl && u.IsControllable && u.AcceptsOrdersFromPlayer && u._userRoot != null,
-            Protected = state is AircraftStates.AdvancedMissileEvasion || stateName == "EvadeMissile" || stateName == "TorpedoEvasion" || stateName == "CounterLaunch",
-            Grounded = (u is Aircraft a && !a._isInFlight) || (u is Helicopter h && !h._isInFlight) || !string.IsNullOrEmpty(u._flightDeckState),
-            Formation = u.Formation != null,
-            SelectedTask = u._userRoot?.SelectedTask != null,
-            LatitudeDeg = u._geoPosition.Latitude,
-            LongitudeDeg = u._geoPosition.Longitude,
-            SpeedMetersPerSecond = u._velocityInKnots * 1852.0 / 3600.0
+            Supported = nativeUnit is Vessel || nativeUnit is Aircraft || nativeUnit is Helicopter,
+            Controllable = nativeUnit.HasControl && nativeUnit.IsControllable && nativeUnit.AcceptsOrdersFromPlayer && nativeUnit._userRoot != null,
+            Protected = state is AircraftStates.AdvancedMissileEvasion || stateName == "EvadeMissile" || stateName == "TorpedoEvasion"
+                || stateName == "CounterLaunch",
+            Grounded = (nativeUnit is Aircraft aircraft && !aircraft._isInFlight) || (nativeUnit is Helicopter helicopter && !helicopter._isInFlight)
+                || !string.IsNullOrEmpty(nativeUnit._flightDeckState),
+            Formation = nativeUnit.Formation != null,
+            SelectedTask = nativeUnit._userRoot?.SelectedTask != null,
+            LatitudeDeg = nativeUnit._geoPosition.Latitude,
+            LongitudeDeg = nativeUnit._geoPosition.Longitude,
+            SpeedMetersPerSecond = nativeUnit._velocityInKnots * MetersPerNauticalMile / SecondsPerHour
         };
-        var d = u._obp?._flightDeck;
-        if (d != null)
+        var flightDeck = nativeUnit._obp?._flightDeck;
+        if (flightDeck != null)
         {
-            s.PendingOperations = d.FlightDeckTasks.Count;
-            foreach (var v in d._vehiclesOnBoard.Where(v => v.Numbers > 0).Take(12))
+            sample.PendingOperations = flightDeck.FlightDeckTasks.Count;
+            foreach (var vehicleType in flightDeck._vehiclesOnBoard.Where(vehicleType => vehicleType.Numbers > 0).Take(MaximumStockSamples))
             {
-                foreach (var q in v.Squadrons.Take(12 - s.Stocks.Count))
+                foreach (var squadron in vehicleType.Squadrons.Take(MaximumStockSamples - sample.Stocks.Count))
                 {
-                    s.Stocks.Add(new StockSample { ClassKey = v._fileName, Squadron = q._name, Count = q.Numbers });
+                    sample.Stocks.Add(new StockSample
+                    {
+                        ClassKey = vehicleType._fileName,
+                        Squadron = squadron._name,
+                        Count = squadron.Numbers
+                    });
                 }
             }
         }
 
-        return s;
+        return sample;
     }
 
     public IReadOnlyList<UnitSample> CaptureUnits()
     {
-        Main();
-        var own = Globals._playerTaskforce._taskforceUnits.Where(u => u != null && !u.IsDestroyed).Take(129).ToArray();
-        foreach (var old in keys.Keys.Where(u => !own.Contains(u)).ToArray())
+        AssertEngineThread();
+        var ownUnits = Globals._playerTaskforce._taskforceUnits.Where(nativeUnit => nativeUnit != null
+            && !nativeUnit.IsDestroyed).Take(MaximumUnitSamplesWithOverflow).ToArray();
+        foreach (var removedUnit in unitKeys.Keys.Where(nativeUnit => !ownUnits.Contains(nativeUnit)).ToArray())
         {
-            objects.Remove(keys[old]);
-            keys.Remove(old);
+            unitsByKey.Remove(unitKeys[removedUnit]);
+            unitKeys.Remove(removedUnit);
         }
 
         var samples = new List<UnitSample>();
-        foreach (var u in own)
+        foreach (var nativeUnit in ownUnits)
         {
-            if (!keys.TryGetValue(u, out var key))
+            if (!unitKeys.TryGetValue(nativeUnit, out var unitKey))
             {
-                key = Guid.NewGuid().ToString("N");
-                keys[u] = key;
-                objects[key] = u;
+                unitKey = Guid.NewGuid().ToString("N");
+                unitKeys[nativeUnit] = unitKey;
+                unitsByKey[unitKey] = nativeUnit;
             }
 
-            var s = Sample(u, key);
-            if (s != null)
+            var sample = SampleUnit(nativeUnit, unitKey);
+            if (sample != null)
             {
-                samples.Add(s);
+                samples.Add(sample);
             }
         }
 
@@ -117,49 +136,62 @@ public sealed class NativeGameFacade : IGameFacade
 
     public IReadOnlyList<TrackSample> CaptureTracks()
     {
-        Main();
-        var output = new List<TrackSample>();
-        foreach (var v in Globals._playerTaskforce.PlottingTable.Vehicles.Where(v => v.Id >= 7001).Take(128))
+        AssertEngineThread();
+        var trackSamples = new List<TrackSample>();
+        foreach (var contact in Globals._playerTaskforce.PlottingTable.Vehicles.Where(contact => contact.Id >= FirstForeignContactId).Take(MaximumTrackSamples))
         {
-            var detected = v.DetectedPosition;
+            var detected = contact.DetectedPosition;
             if (!detected.HasValue)
             {
                 continue;
             }
 
-            if (!tracks.TryGetValue(v.Id, out var id))
+            if (!trackHandles.TryGetValue(contact.Id, out var trackId))
             {
-                id = Guid.NewGuid().ToString("N");
-                tracks[v.Id] = id;
+                trackId = Guid.NewGuid().ToString("N");
+                trackHandles[contact.Id] = trackId;
             }
 
-            output.Add(new TrackSample { Key = id, LatitudeDeg = detected.Value.Item1.Latitude, LongitudeDeg = detected.Value.Item1.Longitude });
+            trackSamples.Add(new TrackSample
+            {
+                Key = trackId,
+                LatitudeDeg = detected.Value.Item1.Latitude,
+                LongitudeDeg = detected.Value.Item1.Longitude
+            });
         }
 
-        return output;
+        return trackSamples;
     }
 
     public UnitSample Resolve(string key)
     {
-        Main();
-        return objects.TryGetValue(key, out var u) ? Sample(u, key) : null;
+        AssertEngineThread();
+        return unitsByKey.TryGetValue(key, out var nativeUnit) ? SampleUnit(nativeUnit, key) : null;
     }
 
     public bool AppendWaypoint(string key, double latitudeDeg, double longitudeDeg, string label)
     {
-        Main();
-        if (!objects.TryGetValue(key, out var u))
+        string unitKey = key; // Preserve the existing named-argument contract.
+        AssertEngineThread();
+        if (!unitsByKey.TryGetValue(unitKey, out var nativeUnit))
         {
             return false;
         }
 
-        var fresh = Sample(u, key);
-        if (fresh == null || Provider.Eligibility(fresh).Availability != NavalCommand.Gateway.Wire.Availability.Executable)
+        var freshSample = SampleUnit(nativeUnit, unitKey);
+        if (freshSample == null || Provider.Eligibility(freshSample).Availability != NavalCommand.Gateway.Wire.Availability.Executable)
         {
             return false;
         }
 
-        var task = u.SetWaypointTask(new WaypointData { _geoposition = new GeoPosition(latitudeDeg, longitudeDeg, u._geoPosition._height), _heightState = WaypointData.WaypointHeightState.Current, _setTelegraph = 2, _allowFormationManeuver = false, wpName = label });
-        return task != null && u._userRoot.TaskViewModels.Any(v => v.Task == task);
+        var waypointTask = nativeUnit.SetWaypointTask(new WaypointData
+        {
+            _geoposition = new GeoPosition(latitudeDeg, longitudeDeg, nativeUnit._geoPosition._height),
+            _heightState = WaypointData.WaypointHeightState.Current,
+            _setTelegraph = WaypointTelegraphSetting,
+            _allowFormationManeuver = false,
+            wpName = label
+        });
+        return waypointTask != null && nativeUnit._userRoot.TaskViewModels.Any(taskViewModel => taskViewModel.Task == waypointTask);
     }
 }

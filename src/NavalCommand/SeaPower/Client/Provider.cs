@@ -11,26 +11,40 @@ namespace NavalCommand.SeaPower.Client;
 // No simulator references cross queues. Serialization is bounded to 128 units/tracks.
 public sealed class Provider
 {
-    readonly IGameFacade game;
-    readonly int thread;
-    readonly string observer;
-    readonly Dictionary<string, string> handles = new();
-    readonly Dictionary<string, OrderResult> ledger = new();
-    readonly Dictionary<string, (string Key, double Lat, double Lon)> movement = new();
-    readonly ConcurrentQueue<byte[]> commands = new(), output = new();
-    string session = "";
-    ulong version;
-    int queued;
+    private const int MaximumOrderBytes = 65_536;
+    private const int MaximumQueuedCommands = 64;
+    private const int MaximumRetainedResults = 128;
+    private const int MaximumSnapshotItems = 128;
+    private const int MaximumStocksPerFacility = 12;
+    private const int MaximumCommandsPerTick = 8;
+    private const int MaximumSnapshotBytes = 1_048_576;
+    private const int MaximumRequestIdCharacters = 128;
+    private const ulong MaximumObservationAgeVersions = 20;
+    private const double MinimumObservedDisplacementMeters = 5;
+    private const double MaximumWaypointDistanceMeters = 185_200;
+    private const double MaximumLatitudeDegrees = 90;
+    private const double MaximumLongitudeDegrees = 180;
+    readonly IGameFacade gameFacade;
+    readonly int ownerThreadId;
+    readonly string observerId;
+    readonly Dictionary<string, string> entityHandles = new();
+    readonly Dictionary<string, OrderResult> requestLedger = new();
+    readonly Dictionary<string, (string Key, double LatitudeDegrees, double LongitudeDegrees)> pendingMovement = new();
+    readonly ConcurrentQueue<byte[]> commandQueue = new();
+    readonly ConcurrentQueue<byte[]> snapshotQueue = new();
+    string sessionId = "";
+    ulong observationVersion;
+    int queuedCommandCount;
     public Provider(IGameFacade game, string observer)
     {
-        this.game = game;
-        this.observer = observer;
-        thread = Thread.CurrentThread.ManagedThreadId;
+        gameFacade = game;
+        observerId = observer;
+        ownerThreadId = Thread.CurrentThread.ManagedThreadId;
     }
 
-    void Main()
+    void AssertEngineThread()
     {
-        if (thread != Thread.CurrentThread.ManagedThreadId)
+        if (ownerThreadId != Thread.CurrentThread.ManagedThreadId)
         {
             throw new InvalidOperationException("engine_thread_required");
         }
@@ -38,30 +52,30 @@ public sealed class Provider
 
     public bool Enqueue(byte[] immutableBytes)
     {
-        if (immutableBytes == null || immutableBytes.Length > 65536)
+        if (immutableBytes == null || immutableBytes.Length > MaximumOrderBytes)
         {
             return false;
         }
 
-        if (Interlocked.Increment(ref queued) > 64)
+        if (Interlocked.Increment(ref queuedCommandCount) > MaximumQueuedCommands)
         {
-            Interlocked.Decrement(ref queued);
+            Interlocked.Decrement(ref queuedCommandCount);
             return false;
         }
 
-        commands.Enqueue((byte[])immutableBytes.Clone());
+        commandQueue.Enqueue((byte[])immutableBytes.Clone());
         return true;
     }
 
-    public bool TryRead(out byte[] bytes) => output.TryDequeue(out bytes);
+    public bool TryRead(out byte[] bytes) => snapshotQueue.TryDequeue(out bytes);
     // Separate outgoing channels preserve canonical payload types without extra schema.
     public readonly ConcurrentQueue<byte[]> Results = new();
-    void Result(OrderResult r)
+    void PublishResult(OrderResult orderResult)
     {
-        ledger[r.RequestId] = r;
-        if (Results.Count < 128)
+        requestLedger[orderResult.RequestId] = orderResult;
+        if (Results.Count < MaximumRetainedResults)
         {
-            Results.Enqueue(r.ToByteArray());
+            Results.Enqueue(orderResult.ToByteArray());
         }
         else
         {
@@ -71,19 +85,19 @@ public sealed class Provider
 
     public void Invalidate()
     {
-        Main();
-        session = "";
-        version = 0;
-        handles.Clear();
-        ledger.Clear();
-        movement.Clear();
-        game.Reset();
-        while (commands.TryDequeue(out _))
+        AssertEngineThread();
+        sessionId = "";
+        observationVersion = 0;
+        entityHandles.Clear();
+        requestLedger.Clear();
+        pendingMovement.Clear();
+        gameFacade.Reset();
+        while (commandQueue.TryDequeue(out _))
         {
-            Interlocked.Decrement(ref queued);
+            Interlocked.Decrement(ref queuedCommandCount);
         }
 
-        while (output.TryDequeue(out _))
+        while (snapshotQueue.TryDequeue(out _))
         {
         }
 
@@ -91,7 +105,7 @@ public sealed class Provider
         {
         }
 
-        var w = new WorldSnapshot
+        var snapshot = new WorldSnapshot
         {
             Session = new Session
             {
@@ -99,15 +113,15 @@ public sealed class Provider
                 Ready = false
             }
         };
-        output.Enqueue(w.ToByteArray());
+        snapshotQueue.Enqueue(snapshot.ToByteArray());
     }
 
     public byte[] Tick()
     {
-        Main();
-        if (!game.Ready)
+        AssertEngineThread();
+        if (!gameFacade.Ready)
         {
-            if (session != "")
+            if (sessionId != "")
             {
                 Invalidate();
             }
@@ -115,196 +129,213 @@ public sealed class Provider
             return null;
         }
 
-        if (session == "")
+        if (sessionId == "")
         {
-            session = Guid.NewGuid().ToString("N");
+            sessionId = Guid.NewGuid().ToString("N");
         }
 
-        var units = game.CaptureUnits().Where(u => u.Own).Take(129).ToArray();
-        var current = new HashSet<string>(units.Take(128).Select(u => u.Key));
-        foreach (var key in handles.Keys.Where(k => !current.Contains(k)).ToArray())
+        var units = gameFacade.CaptureUnits().Where(unit => unit.Own).Take(MaximumSnapshotItems + 1).ToArray();
+        var currentUnitKeys = new HashSet<string>(units.Take(MaximumSnapshotItems).Select(unit => unit.Key));
+        foreach (var key in entityHandles.Keys.Where(candidateUnitKey => !currentUnitKeys.Contains(candidateUnitKey)).ToArray())
         {
-            handles.Remove(key);
+            entityHandles.Remove(key);
         }
 
-        foreach (var u in units.Take(128))
+        foreach (var unit in units.Take(MaximumSnapshotItems))
         {
-            if (!handles.ContainsKey(u.Key))
+            if (!entityHandles.ContainsKey(unit.Key))
             {
-                handles[u.Key] = Guid.NewGuid().ToString("N");
+                entityHandles[unit.Key] = Guid.NewGuid().ToString("N");
             }
         }
 
         // Process bounded commands before publishing a new version.
-        for (int i = 0; i < 8 && commands.TryDequeue(out var bytes); ++i)
+        for (int commandIndex = 0; commandIndex < MaximumCommandsPerTick && commandQueue.TryDequeue(out var bytes); ++commandIndex)
         {
-            Interlocked.Decrement(ref queued);
-            OrderRequest r;
+            Interlocked.Decrement(ref queuedCommandCount);
+            OrderRequest orderResult;
             try
             {
-                r = OrderRequest.Parser.ParseFrom(bytes);
+                orderResult = OrderRequest.Parser.ParseFrom(bytes);
             }
             catch
             {
                 continue;
             }
 
-            Dispatch(r);
+            Dispatch(orderResult);
         }
 
-        var w = new WorldSnapshot
+        var snapshot = new WorldSnapshot
         {
             Session = new Session
             {
                 SchemaVersion = 1,
-                SessionId = session,
-                ObserverId = observer,
+                SessionId = sessionId,
+                ObserverId = observerId,
                 Ready = true
             },
-            ObservationVersion = ++version,
-            OperationalSeconds = game.OperationalSeconds,
-            Truncated = units.Length > 128
+            ObservationVersion = ++observationVersion,
+            OperationalSeconds = gameFacade.OperationalSeconds,
+            Truncated = units.Length > MaximumSnapshotItems
         };
-        foreach (var u in units.Take(128))
+        foreach (var unit in units.Take(MaximumSnapshotItems))
         {
-            var x = new Unit
+            var wireUnit = new Unit
             {
-                Id = handles[u.Key],
-                Name = u.Name,
+                Id = entityHandles[unit.Key],
+                Name = unit.Name,
                 Position = new GeoPoint
                 {
-                    LatitudeDeg = u.LatitudeDeg,
-                    LongitudeDeg = u.LongitudeDeg
+                    LatitudeDeg = unit.LatitudeDeg,
+                    LongitudeDeg = unit.LongitudeDeg
                 },
-                SpeedMps = u.SpeedMetersPerSecond,
-                SampledAtSeconds = game.OperationalSeconds
+                SpeedMps = unit.SpeedMetersPerSecond,
+                SampledAtSeconds = gameFacade.OperationalSeconds
             };
-            x.Orders.Add(Eligibility(u));
-            w.OwnUnits.Add(x);
-            if (u.Stocks.Count > 0)
+            wireUnit.Orders.Add(Eligibility(unit));
+            snapshot.OwnUnits.Add(wireUnit);
+            if (unit.Stocks.Count > 0)
             {
-                var f = new Facility
+                var facility = new Facility
                 {
-                    EntityId = x.Id,
-                    PendingOperations = (uint)Math.Max(0, u.PendingOperations),
-                    SampledAtSeconds = game.OperationalSeconds
+                    EntityId = wireUnit.Id,
+                    PendingOperations = (uint)Math.Max(0, unit.PendingOperations),
+                    SampledAtSeconds = gameFacade.OperationalSeconds
                 };
-                foreach (var s in u.Stocks.Take(12))
+                foreach (var stock in unit.Stocks.Take(MaximumStocksPerFacility))
                 {
-                    f.Stocks.Add(new Stock { ClassKey = s.ClassKey, Squadron = s.Squadron, UnreservedCount = (uint)Math.Max(0, s.Count) });
+                    facility.Stocks.Add(new Stock
+                    {
+                        ClassKey = stock.ClassKey,
+                        Squadron = stock.Squadron,
+                        UnreservedCount = (uint)Math.Max(0, stock.Count)
+                    });
                 }
 
-                w.Facilities.Add(f);
+                snapshot.Facilities.Add(facility);
             }
         }
 
-        foreach (var t in game.CaptureTracks().Take(128))
+        foreach (var track in gameFacade.CaptureTracks().Take(MaximumSnapshotItems))
         {
-            w.Tracks.Add(new Track { Id = t.Key, DetectedPosition = new GeoPoint { LatitudeDeg = t.LatitudeDeg, LongitudeDeg = t.LongitudeDeg }, SampledAtSeconds = game.OperationalSeconds, Provenance = "selected_plotting_table_detected_position_cache" });
+            snapshot.Tracks.Add(new Track
+            {
+                Id = track.Key,
+                DetectedPosition = new GeoPoint
+                {
+                    LatitudeDeg = track.LatitudeDeg,
+                    LongitudeDeg = track.LongitudeDeg
+                },
+                SampledAtSeconds = gameFacade.OperationalSeconds,
+                Provenance = "selected_plotting_table_detected_position_cache"
+            });
         }
 
-        foreach (var p in movement.ToArray())
+        foreach (var pendingRequest in pendingMovement.ToArray())
         {
-            var u = game.Resolve(p.Value.Key);
-            if (u == null || !u.Own)
+            var unit = gameFacade.Resolve(pendingRequest.Value.Key);
+            if (unit == null || !unit.Own)
             {
-                movement.Remove(p.Key);
+                pendingMovement.Remove(pendingRequest.Key);
                 continue;
             }
 
-            var meters = Distance(p.Value.Lat, p.Value.Lon, u.LatitudeDeg, u.LongitudeDeg);
-            if (meters >= 5)
+            var distanceMeters = Distance(pendingRequest.Value.LatitudeDegrees, pendingRequest.Value.LongitudeDegrees, unit.LatitudeDeg, unit.LongitudeDeg);
+            if (distanceMeters >= MinimumObservedDisplacementMeters)
             {
-                var r = ledger[p.Key].Clone();
-                r.Stage = Stage.MovementObserved;
-                r.Reason = "displacement_after_native_task_creation";
-                r.DisplacementM = meters;
-                r.SampledAtSeconds = game.OperationalSeconds;
-                Result(r);
-                movement.Remove(p.Key);
+                var orderResult = requestLedger[pendingRequest.Key].Clone();
+                orderResult.Stage = Stage.MovementObserved;
+                orderResult.Reason = "displacement_after_native_task_creation";
+                orderResult.DisplacementM = distanceMeters;
+                orderResult.SampledAtSeconds = gameFacade.OperationalSeconds;
+                PublishResult(orderResult);
+                pendingMovement.Remove(pendingRequest.Key);
             }
         }
 
-        var payload = w.ToByteArray();
-        if (payload.Length > 1048576)
+        var payload = snapshot.ToByteArray();
+        if (payload.Length > MaximumSnapshotBytes)
         {
             throw new InvalidOperationException("snapshot_too_large");
         }
 
-        while (output.TryDequeue(out _))
+        while (snapshotQueue.TryDequeue(out _))
         {
         }
 
-        output.Enqueue(payload);
+        snapshotQueue.Enqueue(payload);
         return payload;
     }
 
     public static OrderEligibility Eligibility(UnitSample u)
     {
-        var e = new OrderEligibility
+        // Retain the public parameter name for named-argument compatibility.
+        var unit = u;
+        var eligibility = new OrderEligibility
         {
             Kind = "set_waypoint",
             Availability = Availability.Executable,
             ArgumentSemantics = "append; latitude/longitude degrees; current altitude; native telegraph 2; isolated unit only"
         };
-        if (!u.Supported)
+        if (!unit.Supported)
         {
-            e.Availability = Availability.Unsupported;
-            e.Reason = "unsupported_unit_family";
+            eligibility.Availability = Availability.Unsupported;
+            eligibility.Reason = "unsupported_unit_family";
         }
-        else if (!u.Own)
+        else if (!unit.Own)
         {
-            e.Availability = Availability.Blocked;
-            e.Reason = "wrong_side_or_invalid_entity";
+            eligibility.Availability = Availability.Blocked;
+            eligibility.Reason = "wrong_side_or_invalid_entity";
         }
-        else if (u.Protected)
+        else if (unit.Protected)
         {
-            e.Availability = Availability.Blocked;
-            e.Reason = "protected_native_action";
+            eligibility.Availability = Availability.Blocked;
+            eligibility.Reason = "protected_native_action";
         }
-        else if (u.Grounded)
+        else if (unit.Grounded)
         {
-            e.Availability = Availability.Unknown;
-            e.Reason = "grounded_launch_sequence_unverified";
+            eligibility.Availability = Availability.Unknown;
+            eligibility.Reason = "grounded_launch_sequence_unverified";
         }
-        else if (!u.Controllable)
+        else if (!unit.Controllable)
         {
-            e.Availability = Availability.Blocked;
-            e.Reason = "uncontrollable";
+            eligibility.Availability = Availability.Blocked;
+            eligibility.Reason = "uncontrollable";
         }
-        else if (u.Formation)
+        else if (unit.Formation)
         {
-            e.Availability = Availability.Unknown;
-            e.Reason = "formation_effects_unverified";
+            eligibility.Availability = Availability.Unknown;
+            eligibility.Reason = "formation_effects_unverified";
         }
-        else if (u.SelectedTask)
+        else if (unit.SelectedTask)
         {
-            e.Availability = Availability.Blocked;
-            e.Reason = "native_task_selection_active";
+            eligibility.Availability = Availability.Blocked;
+            eligibility.Reason = "native_task_selection_active";
         }
 
-        return e;
+        return eligibility;
     }
 
-    void Dispatch(OrderRequest r)
+    void Dispatch(OrderRequest request)
     {
         var result = new OrderResult
         {
-            SessionId = r.SessionId,
-            RequestId = r.RequestId,
+            SessionId = request.SessionId,
+            RequestId = request.RequestId,
             Stage = Stage.Rejected,
-            SampledAtSeconds = game.OperationalSeconds
+            SampledAtSeconds = gameFacade.OperationalSeconds
         };
         void Reject(string reason)
         {
             result.Reason = reason;
-            Result(result);
+            PublishResult(result);
         }
 
-        if (r.SessionId != session)
+        if (request.SessionId != sessionId)
         {
             result.Reason = "stale_session";
-            if (Results.Count < 128)
+            if (Results.Count < MaximumRetainedResults)
             {
                 Results.Enqueue(result.ToByteArray());
             }
@@ -312,20 +343,20 @@ public sealed class Provider
             return;
         }
 
-        if (ledger.TryGetValue(r.RequestId, out var prior))
+        if (requestLedger.TryGetValue(request.RequestId, out var priorResult))
         {
-            if (Results.Count < 128)
+            if (Results.Count < MaximumRetainedResults)
             {
-                Results.Enqueue(prior.ToByteArray());
+                Results.Enqueue(priorResult.ToByteArray());
             }
 
             return;
         }
 
-        if (ledger.Count >= 128)
+        if (requestLedger.Count >= MaximumRetainedResults)
         {
             result.Reason = "ledger_full";
-            if (Results.Count < 128)
+            if (Results.Count < MaximumRetainedResults)
             {
                 Results.Enqueue(result.ToByteArray());
             }
@@ -333,34 +364,37 @@ public sealed class Provider
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(r.RequestId) || r.RequestId.Length > 128)
+        if (string.IsNullOrWhiteSpace(request.RequestId) || request.RequestId.Length > MaximumRequestIdCharacters)
         {
             Reject("invalid_arguments");
             return;
         }
 
-        var key = handles.FirstOrDefault(p => p.Value == r.EntityId).Key;
-        var u = key == null ? null : game.Resolve(key);
-        if (u == null || !u.Own)
+        var unitKey = entityHandles.FirstOrDefault(entry => entry.Value == request.EntityId).Key;
+        var unit = unitKey == null ? null : gameFacade.Resolve(unitKey);
+        if (unit == null || !unit.Own)
         {
             Reject("wrong_side_or_invalid_entity");
             return;
         }
 
-        var p = r.Waypoint;
-        if (p == null || !double.IsFinite(p.LatitudeDeg) || !double.IsFinite(p.LongitudeDeg) || Math.Abs(p.LatitudeDeg) > 90 || Math.Abs(p.LongitudeDeg) > 180 || Distance(u.LatitudeDeg, u.LongitudeDeg, p.LatitudeDeg, p.LongitudeDeg) > 185200)
+        var waypoint = request.Waypoint;
+        if (waypoint == null || !double.IsFinite(waypoint.LatitudeDeg) || !double.IsFinite(waypoint.LongitudeDeg)
+            || Math.Abs(waypoint.LatitudeDeg) > MaximumLatitudeDegrees || Math.Abs(waypoint.LongitudeDeg) > MaximumLongitudeDegrees
+            || Distance(unit.LatitudeDeg, unit.LongitudeDeg, waypoint.LatitudeDeg, waypoint.LongitudeDeg) > MaximumWaypointDistanceMeters)
         {
             Reject("invalid_arguments");
             return;
         }
 
-        if (r.BasedOnVersion == 0 || r.BasedOnVersion > version || version - r.BasedOnVersion > 20)
+        if (request.BasedOnVersion == 0 || request.BasedOnVersion > observationVersion
+            || observationVersion - request.BasedOnVersion > MaximumObservationAgeVersions)
         {
             Reject("stale_observation");
             return;
         }
 
-        var eligible = Eligibility(u);
+        var eligible = Eligibility(unit);
         if (eligible.Availability != Availability.Executable)
         {
             Reject(eligible.Reason);
@@ -368,7 +402,7 @@ public sealed class Provider
         }
 
         // Facade revalidates native membership/state once more adjacent to mutation.
-        if (!game.AppendWaypoint(key, p.LatitudeDeg, p.LongitudeDeg, "NC-" + r.RequestId))
+        if (!gameFacade.AppendWaypoint(unitKey, waypoint.LatitudeDeg, waypoint.LongitudeDeg, "NC-" + request.RequestId))
         {
             Reject("native_dispatch_refused");
             return;
@@ -376,8 +410,8 @@ public sealed class Provider
 
         result.Stage = Stage.NativeTaskCreated;
         result.Reason = "native_task_membership_verified";
-        Result(result);
-        movement[r.RequestId] = (key, u.LatitudeDeg, u.LongitudeDeg);
+        PublishResult(result);
+        pendingMovement[request.RequestId] = (unitKey, unit.LatitudeDeg, unit.LongitudeDeg);
     }
 
     public static double Distance(double la, double lo, double lb, double lob)

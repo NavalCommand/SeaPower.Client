@@ -7,6 +7,9 @@
   <ItemGroup>
     <Compile Include="../src/NavalCommand/SeaPower/Client/Provider.cs" Link="Provider.cs" />
     <Compile Include="../src/NavalCommand/SeaPower/Client/IGameFacade.cs" Link="IGameFacade.cs" />
+    <Compile Include="../src/NavalCommand/SeaPower/Client/UnitSample.cs" Link="UnitSample.cs" />
+    <Compile Include="../src/NavalCommand/SeaPower/Client/StockSample.cs" Link="StockSample.cs" />
+    <Compile Include="../src/NavalCommand/SeaPower/Client/TrackSample.cs" Link="TrackSample.cs" />
     <ProjectReference Include="$(GatewayApiSource)/managed/Gateway.Api.csproj" />
   </ItemGroup>
 </Project>

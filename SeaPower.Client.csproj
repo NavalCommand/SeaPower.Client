@@ -1,16 +1,53 @@
 <Project Sdk="Microsoft.NET.Sdk">
-<PropertyGroup><TargetFramework>netstandard2.1</TargetFramework><LangVersion>12</LangVersion><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
-<ItemGroup><Compile Include="src/**/*.cs" /><ProjectReference Include="$(GatewayApiSource)/managed/Gateway.Api.csproj" /></ItemGroup>
-<ItemGroup>
-<Reference Include="Seapower-Scripts"><HintPath>$(GameManaged)/Seapower-Scripts.dll</HintPath><Private>false</Private></Reference>
-<Reference Include="UnityEngine.CoreModule"><HintPath>$(GameManaged)/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
-<Reference Include="UnityEngine"><HintPath>$(GameManaged)/UnityEngine.dll</HintPath><Private>false</Private></Reference>
-<Reference Include="Plugins"><HintPath>$(GameManaged)/Plugins.dll</HintPath><Private>false</Private></Reference>
-<Reference Include="Libraries"><HintPath>$(GameManaged)/Libraries.dll</HintPath><Private>false</Private></Reference>
-<Reference Include="UniRx"><HintPath>$(GameManaged)/UniRx.dll</HintPath><Private>false</Private></Reference>
-<Reference Include="Unity.Entities"><HintPath>$(GameManaged)/Unity.Entities.dll</HintPath><Private>false</Private></Reference>
-<Reference Include="Unity.Mathematics"><HintPath>$(GameManaged)/Unity.Mathematics.dll</HintPath><Private>false</Private></Reference>
-<Reference Include="Noesis.NoesisGUI"><HintPath>$(GameManaged)/Noesis.NoesisGUI.dll</HintPath><Private>false</Private></Reference>
-<Reference Include="ParadoxNotion"><HintPath>$(GameManaged)/ParadoxNotion.dll</HintPath><Private>false</Private></Reference>
-</ItemGroup></Project>
-
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>12</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="src/**/*.cs" />
+    <ProjectReference Include="$(GatewayApiSource)/managed/Gateway.Api.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="Seapower-Scripts">
+      <HintPath>$(GameManaged)/Seapower-Scripts.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManaged)/UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameManaged)/UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Plugins">
+      <HintPath>$(GameManaged)/Plugins.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Libraries">
+      <HintPath>$(GameManaged)/Libraries.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UniRx">
+      <HintPath>$(GameManaged)/UniRx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.Entities">
+      <HintPath>$(GameManaged)/Unity.Entities.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.Mathematics">
+      <HintPath>$(GameManaged)/Unity.Mathematics.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Noesis.NoesisGUI">
+      <HintPath>$(GameManaged)/Noesis.NoesisGUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ParadoxNotion">
+      <HintPath>$(GameManaged)/ParadoxNotion.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RequiresManagedContext>true</RequiresManagedContext>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>12</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/Provider.cs" Link="Provider.cs" />
+    <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/IGameFacade.cs" Link="IGameFacade.cs" />
+    <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/UnitSample.cs" Link="UnitSample.cs" />
+    <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/StockSample.cs" Link="StockSample.cs" />
+    <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/TrackSample.cs" Link="TrackSample.cs" />
+    <ProjectReference Include="$(GatewayApiSource)/managed/Gateway.Api.csproj" />
+  </ItemGroup>
+</Project>

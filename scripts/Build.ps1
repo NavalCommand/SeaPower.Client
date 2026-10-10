@@ -1,3 +1,10 @@
-param([string]$Preset = 'windows-msvc-release', [string]$CMake = 'cmake', [string]$BuildCMakeSource)
+param(
+    [string]$Preset = 'windows-msvc-release',
+    [string]$Configuration = 'Release',
+    [string]$CMake = 'cmake'
+)
 $ErrorActionPreference = 'Stop'
-& "$PSScriptRoot/Build-Native.ps1" -Preset $Preset -CMake $CMake -BuildCMakeSource $BuildCMakeSource
+& $CMake --build "$PSScriptRoot/../o/$Preset" --config $Configuration --target SeaPower.Client.Managed
+if ($LASTEXITCODE) {
+    throw 'SeaPower.Client.Managed failed; configure the selected preset before building.'
+}

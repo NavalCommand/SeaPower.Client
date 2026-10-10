@@ -1,5 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <RequiresManagedContext>true</RequiresManagedContext>
+    <RequiresGameReferences>true</RequiresGameReferences>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <TargetFramework>netstandard2.1</TargetFramework>
     <LangVersion>12</LangVersion>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>

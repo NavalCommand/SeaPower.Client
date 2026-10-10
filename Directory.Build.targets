@@ -1,0 +1,9 @@
+<Project>
+  <Import Project="$(NavalCommandManagedTargets)" Condition="Exists('$(NavalCommandManagedTargets)')" />
+  <Target Name="ValidateManagedContext" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(RequiresManagedContext)' == 'true' and !Exists('$(NavalCommandManagedTargets)')"
+           Text="Configure this repository with CMake first to resolve the managed build context." />
+    <Error Condition="'$(RequiresGameReferences)' == 'true' and !Exists('$(GameManaged)/Seapower-Scripts.dll')"
+           Text="Configure SEAPOWER_GAME_ROOT with CMake for the approved compile-only game references." />
+  </Target>
+</Project>

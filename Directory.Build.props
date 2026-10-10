@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)o/managed/$(MSBuildProjectName)/bin/</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)o/managed/$(MSBuildProjectName)/obj/</BaseIntermediateOutputPath>
+  </PropertyGroup>
+  <Import Project="$(MSBuildThisFileDirectory)o/managed/Build.Context.props"
+          Condition="Exists('$(MSBuildThisFileDirectory)o/managed/Build.Context.props')" />
+</Project>

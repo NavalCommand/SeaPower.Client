@@ -46,7 +46,12 @@ sealed class FakeGameFacade : IGameFacade
 
     public void Reset()
     {
+        LaunchResets++;
     }
+    public int LaunchResets;
+    public int LaunchPolls;
+    public Stage LaunchAcceptance = Stage.NativeTaskCreated;
+    public bool KeepUnknownLaunchTracking;
     public LaunchProgress LaunchFacility(string key, FacilityLaunch request)
     {
         string reason = !Own.LaunchSupported ? "unsupported_facility"
@@ -59,14 +64,19 @@ sealed class FakeGameFacade : IGameFacade
             return new LaunchProgress { Reason = reason };
         }
         ++LaunchMutations;
-        return new LaunchProgress { Token = "launch", Stage = Stage.NativeTaskCreated, Reason = "fake_reservation" };
+        return new LaunchProgress { Token = "launch", Stage = LaunchAcceptance, Reason = "fake_reservation", TrackingActive = true };
     }
-    public LaunchProgress PollLaunch(string token) => new()
+    public LaunchProgress PollLaunch(string token)
     {
-        Stage = LaunchStage,
-        Reason = "fake_progress",
-        SpawnedKey = LaunchStage == Stage.AircraftSpawned || LaunchStage == Stage.Airborne ? "spawn" : ""
-    };
+        LaunchPolls++;
+        return new LaunchProgress
+        {
+            Stage = LaunchStage,
+            Reason = "fake_progress",
+            SpawnedKey = LaunchStage == Stage.AircraftSpawned || LaunchStage == Stage.Airborne ? "spawn" : "",
+            TrackingActive = LaunchStage != Stage.Airborne && (LaunchStage != Stage.ExecutionUnknown || KeepUnknownLaunchTracking)
+        };
+    }
 
     public RouteMutation UpdateRoute(string key, double latitudeDeg, double longitudeDeg, string label, RouteMode mode)
     {

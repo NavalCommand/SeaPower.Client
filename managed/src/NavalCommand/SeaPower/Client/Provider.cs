@@ -314,16 +314,19 @@ public sealed class Provider
             {
                 result.SpawnedEntityId = spawnedId;
             }
-            if (result.Stage != progress.Stage || result.SpawnedEntityId != requestLedger[pending.Key].SpawnedEntityId)
+            // Tracking ownership must survive publication backpressure. Terminal
+            // native records are already released and must never be polled again.
+            if (!progress.TrackingActive)
+            {
+                pendingLaunches.Remove(pending.Key);
+            }
+            if (result.Stage != progress.Stage || result.Reason != progress.Reason
+                || result.SpawnedEntityId != requestLedger[pending.Key].SpawnedEntityId)
             {
                 result.Stage = progress.Stage;
                 result.Reason = progress.Reason;
                 result.SampledAtSeconds = gameFacade.OperationalSeconds;
                 PublishResult(result);
-            }
-            if (progress.Stage == Stage.Airborne || progress.Stage == Stage.ExecutionUnknown)
-            {
-                pendingLaunches.Remove(pending.Key);
             }
         }
         var payload = snapshot.ToByteArray();
@@ -502,11 +505,11 @@ public sealed class Provider
             var progress = gameFacade.LaunchFacility(unitKey, launch);
             result.Stage = progress.Stage;
             result.Reason = progress.Reason;
-            PublishResult(result);
-            if (progress.Stage == Stage.NativeTaskCreated && progress.Token != "")
+            if (progress.TrackingActive && progress.Token != "")
             {
                 pendingLaunches[request.RequestId] = progress.Token;
             }
+            PublishResult(result);
             return;
         }
         if (waypoint == null || !double.IsFinite(waypoint.LatitudeDeg) || !double.IsFinite(waypoint.LongitudeDeg)

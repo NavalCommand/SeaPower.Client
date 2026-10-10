@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using NavalCommand.Gateway.Wire;
 using SeaPower;
@@ -13,12 +14,14 @@ public sealed partial class NativeGameFacade
     const string ValidatedFacilityClass = "airfield_small_1";
     const string ValidatedAircraftClass = "usaf_f-4e";
     const string ValidatedLoadout = "AirToAir";
+    const int MaximumTrackedLaunches = 64;
     sealed class LaunchRecord
     {
         public PendingLaunchTask Task;
         public ObjectBase Facility;
         public ObjectBase Spawned;
         public EventHandler<ObjectBase> Handler;
+        public LaunchLifecycle Lifecycle;
     }
     readonly Dictionary<string, LaunchRecord> launches = new();
 
@@ -26,7 +29,7 @@ public sealed partial class NativeGameFacade
     {
         foreach (var record in launches.Values)
         {
-            record.Task.Launched -= record.Handler;
+            record.Lifecycle.Dispose();
         }
         launches.Clear();
     }
@@ -126,73 +129,103 @@ public sealed partial class NativeGameFacade
         {
             return result;
         }
-        if (launches.Count >= 64)
+        if (launches.Count >= MaximumTrackedLaunches)
         {
             result.Reason = "launch_ledger_full";
             return result;
         }
+        var tasksBefore = new HashSet<PendingLaunchTask>(deck.FlightDeckTasks.Concat(deck._flightDeckTasksToAdd).OfType<PendingLaunchTask>());
+        int stockBefore = vehicle.Numbers;
+        int squadronBefore = squadron.Numbers;
+        var progress = LaunchLifecycle.Start(
+            () => deck.createLaunchTask(vehicle, loadout, squadron, squadron.Callsigns[0], new LaunchTaskParameters()),
+            () =>
+            {
+                // A native exception can follow insertion but precede the return.
+                // Recover only one new task matching this exact own launch request.
+                var candidates = deck.FlightDeckTasks.Concat(deck._flightDeckTasksToAdd).OfType<PendingLaunchTask>()
+                    .Where(candidate => !tasksBefore.Contains(candidate) && candidate.VehicleType == vehicle
+                        && candidate._squadronIndex == vehicle.Squadrons.IndexOf(squadron)
+                        && candidate._loadoutIndex == vehicle.Loadouts.IndexOf(loadout)).Distinct().Take(2).ToArray();
+                return candidates.Length == 1 ? candidates[0] : null;
+            },
+            (task, progress) => RegisterLaunch(task, facility, progress),
+            task => deck.FlightDeckTasks.Contains(task) && task.LaunchCount == 1
+                && vehicle.Numbers == stockBefore - 1 && squadron.Numbers == squadronBefore - 1);
+        if (progress.TrackingActive)
+        {
+            launches[progress.Token].Lifecycle.RememberAcceptance(progress);
+        }
+        return progress;
+    }
+    static double LaunchWallSeconds => (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
+
+    void RegisterLaunch(PendingLaunchTask task, ObjectBase facility, LaunchProgress result)
+    {
+        var record = new LaunchRecord { Task = task, Facility = facility };
+        record.Handler = (_, spawned) =>
+        {
+            AssertEngineThread();
+            record.Spawned = spawned;
+        };
+        record.Lifecycle = new LaunchLifecycle(LaunchWallSeconds, () => task.Launched -= record.Handler);
+        string token = Guid.NewGuid().ToString("N");
         try
         {
-            int stockBefore = vehicle.Numbers;
-            int squadronBefore = squadron.Numbers;
-            var task = deck.createLaunchTask(vehicle, loadout, squadron, squadron.Callsigns[0], new LaunchTaskParameters());
-            if (task == null)
-            {
-                result.Reason = "native_launch_refused";
-                return result;
-            }
-            var record = new LaunchRecord { Task = task, Facility = facility };
-            record.Handler = (_, spawned) =>
-            {
-                AssertEngineThread();
-                record.Spawned = spawned;
-            };
+            launches.Add(token, record);
             task.Launched += record.Handler;
-            result.Token = Guid.NewGuid().ToString("N");
-            launches.Add(result.Token, record);
-            bool reservationVerified = deck.FlightDeckTasks.Contains(task) && task.LaunchCount == 1
-                && vehicle.Numbers == stockBefore - 1 && squadron.Numbers == squadronBefore - 1;
-            result.Stage = reservationVerified ? Stage.NativeTaskCreated : Stage.ExecutionUnknown;
-            result.Reason = reservationVerified ? "native_launch_reservation_verified" : "native_launch_reservation_unknown";
+            result.Token = token;
+            result.TrackingActive = true;
         }
-        catch (Exception exception)
+        catch
         {
-            result.Stage = Stage.ExecutionUnknown;
-            result.Reason = "native_launch_exception:" + exception.GetType().Name;
+            record.Lifecycle.Dispose();
+            launches.Remove(token);
+            throw;
         }
-        return result;
     }
 
     public LaunchProgress PollLaunch(string token)
     {
         AssertEngineThread();
-        var result = new LaunchProgress { Token = token, Stage = Stage.ExecutionUnknown, Reason = "launch_lost" };
         if (!launches.TryGetValue(token, out var record))
         {
-            return result;
+            return new LaunchProgress { Token = token, Stage = Stage.ExecutionUnknown, Reason = "launch_tracking_expired" };
         }
-        var spawned = record.Spawned;
-        if (spawned != null && !spawned.IsDestroyed && spawned.UnitTaskforce.Value == Globals._playerTaskforce
-            && Globals._playerTaskforce._taskforceUnits.Contains(spawned))
+        LaunchProgress result;
+        try
         {
-            // CaptureUnits registers every normal own object, including grounded spawns.
-            if (unitKeys.TryGetValue(spawned, out var key))
+            var spawned = record.Spawned;
+            var observation = new LaunchLifecycle.Observation
             {
-                result.SpawnedKey = key;
+                SpawnCaptured = spawned != null,
+                SpawnUnavailable = spawned != null && (spawned.IsDestroyed
+                    || (spawned.UnitTaskforce.Value != null && spawned.UnitTaskforce.Value != Globals._playerTaskforce)),
+                TaskCancelled = record.Task._isCancelled,
+                FacilityUnavailable = record.Facility == null || record.Facility.IsDestroyed
+                    || record.Facility.UnitTaskforce.Value != Globals._playerTaskforce
+            };
+            if (spawned != null && !observation.SpawnUnavailable && spawned.UnitTaskforce.Value == Globals._playerTaskforce
+                && Globals._playerTaskforce._taskforceUnits.Contains(spawned) && unitKeys.TryGetValue(spawned, out var key))
+            {
                 var sample = SampleUnit(spawned, key);
-                result.Stage = sample?.Airborne == true ? Stage.Airborne : Stage.AircraftSpawned;
-                result.Reason = sample?.Airborne == true ? "native_airborne_observed" : "native_spawn_membership_observed";
+                if (sample != null)
+                {
+                    observation.SpawnedKey = key;
+                    observation.Airborne = sample.Airborne == true;
+                }
             }
+            var deck = record.Facility?._obp?._flightDeck;
+            observation.TaskPending = deck != null && (deck.FlightDeckTasks.Contains(record.Task) || deck._flightDeckTasksToAdd.Contains(record.Task));
+            result = record.Lifecycle.Observe(observation, LaunchWallSeconds);
         }
-        else if (record.Facility != null && !record.Facility.IsDestroyed && !record.Task._isCancelled
-            && record.Facility._obp._flightDeck.FlightDeckTasks.Contains(record.Task))
+        catch (Exception exception)
         {
-            result.Stage = Stage.Preparing;
-            result.Reason = "native_pending_preparation_observed";
+            result = record.Lifecycle.ReadFailure(LaunchWallSeconds, exception.GetType().Name);
         }
-        if (result.Stage == Stage.Airborne || result.Stage == Stage.ExecutionUnknown)
+        result.Token = token;
+        if (!result.TrackingActive)
         {
-            record.Task.Launched -= record.Handler;
             launches.Remove(token);
         }
         return result;

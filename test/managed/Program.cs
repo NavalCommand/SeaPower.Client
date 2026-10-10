@@ -98,5 +98,6 @@ static class Program
         Check(!provider.Enqueue(new byte[65537]), "message_bound");
         MovementTests.Run();
         LaunchTests.Run();
+        LaunchLifecycleTests.Run();
     }
 }

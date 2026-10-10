@@ -10,6 +10,7 @@
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/IGameFacade.cs" Link="IGameFacade.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/RouteMutation.cs" Link="RouteMutation.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/LaunchProgress.cs" Link="LaunchProgress.cs" />
+    <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/LaunchLifecycle.cs" Link="LaunchLifecycle.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/UnitSample.cs" Link="UnitSample.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/StockSample.cs" Link="StockSample.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/TrackSample.cs" Link="TrackSample.cs" />

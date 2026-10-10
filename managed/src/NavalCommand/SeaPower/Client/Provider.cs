@@ -29,7 +29,8 @@ public sealed class Provider
     readonly string observerId;
     readonly Dictionary<string, string> entityHandles = new();
     readonly Dictionary<string, OrderResult> requestLedger = new();
-    readonly Dictionary<string, (string Key, double LatitudeDegrees, double LongitudeDegrees)> pendingMovement = new();
+    readonly Dictionary<string, (string Key, double LatitudeDegrees, double LongitudeDegrees, bool AwaitingActivation)> pendingMovement = new();
+    readonly Dictionary<string, string> pendingLaunches = new();
     readonly ConcurrentQueue<byte[]> commandQueue = new();
     readonly ConcurrentQueue<byte[]> snapshotQueue = new();
     string sessionId = "";
@@ -91,6 +92,7 @@ public sealed class Provider
         entityHandles.Clear();
         requestLedger.Clear();
         pendingMovement.Clear();
+        pendingLaunches.Clear();
         gameFacade.Reset();
         while (commandQueue.TryDequeue(out _))
         {
@@ -177,7 +179,7 @@ public sealed class Provider
             },
             ObservationVersion = ++observationVersion,
             OperationalSeconds = gameFacade.OperationalSeconds,
-            Truncated = units.Length > MaximumSnapshotItems
+            Truncated = units.Length > MaximumSnapshotItems || units.Any(unit => unit.Truncated)
         };
         foreach (var unit in units.Take(MaximumSnapshotItems))
         {
@@ -194,8 +196,27 @@ public sealed class Provider
                 SampledAtSeconds = gameFacade.OperationalSeconds
             };
             wireUnit.Orders.Add(Eligibility(unit));
+            wireUnit.Orders.Add(RouteEligibility(unit, RouteMode.ReplaceRoute));
+            wireUnit.Orders.Add(RouteEligibility(unit, RouteMode.AppendWaypoint));
+            wireUnit.RouteInspected = unit.RouteInspected;
+            wireUnit.PlannedRoute.Add(unit.Route.Select(point => point.Clone()));
+            if (unit.Airborne.HasValue)
+            {
+                wireUnit.Airborne = unit.Airborne.Value;
+            }
+            if (unit.LaunchSupported)
+            {
+                bool hasExecutableOption = unit.Stocks.Any(stock => stock.LaunchOptions.Any(option => option.Availability == Availability.Executable));
+                wireUnit.Orders.Add(new OrderEligibility
+                {
+                    Kind = "facility_launch",
+                    Availability = unit.LaunchRestriction == "" && hasExecutableOption ? Availability.Executable : Availability.Blocked,
+                    Reason = unit.LaunchRestriction != "" ? unit.LaunchRestriction : hasExecutableOption ? "" : "no_executable_launch_option",
+                    ArgumentSemantics = "one aircraft; own land airfield; exact stock class/squadron/loadout; native preparation and takeoff"
+                });
+            }
             snapshot.OwnUnits.Add(wireUnit);
-            if (unit.Stocks.Count > 0)
+            if (unit.HasFacility || unit.Stocks.Count > 0)
             {
                 var facility = new Facility
                 {
@@ -203,14 +224,28 @@ public sealed class Provider
                     PendingOperations = (uint)Math.Max(0, unit.PendingOperations),
                     SampledAtSeconds = gameFacade.OperationalSeconds
                 };
+                if (unit.OnboardCount.HasValue)
+                {
+                    facility.OnboardCount = unit.OnboardCount.Value;
+                }
+                if (unit.ReservedCount.HasValue)
+                {
+                    facility.ReservedCount = unit.ReservedCount.Value;
+                }
+                if (unit.CooldownCount.HasValue)
+                {
+                    facility.CooldownCount = unit.CooldownCount.Value;
+                }
                 foreach (var stock in unit.Stocks.Take(MaximumStocksPerFacility))
                 {
-                    facility.Stocks.Add(new Stock
+                    var wireStock = new Stock
                     {
                         ClassKey = stock.ClassKey,
                         Squadron = stock.Squadron,
                         UnreservedCount = (uint)Math.Max(0, stock.Count)
-                    });
+                    };
+                    wireStock.LaunchOptions.Add(stock.LaunchOptions);
+                    facility.Stocks.Add(wireStock);
                 }
 
                 snapshot.Facilities.Add(facility);
@@ -241,12 +276,29 @@ public sealed class Provider
                 continue;
             }
 
+            if (pendingRequest.Value.AwaitingActivation)
+            {
+                // An appended destination is not executing while an earlier waypoint
+                // is at the native route head. Reset displacement at activation.
+                if (!unit.RouteInspected || unit.Route.Count == 0 || unit.Route[0].Label != "NC-" + pendingRequest.Key)
+                {
+                    continue;
+                }
+                pendingMovement[pendingRequest.Key] = (unit.Key, unit.LatitudeDeg, unit.LongitudeDeg, false);
+                continue;
+            }
+            if (requestLedger[pendingRequest.Key].RouteMode != RouteMode.LegacyIdle
+                && (!unit.RouteInspected || unit.Route.Count == 0 || unit.Route[0].Label != "NC-" + pendingRequest.Key))
+            {
+                continue;
+            }
             var distanceMeters = Distance(pendingRequest.Value.LatitudeDegrees, pendingRequest.Value.LongitudeDegrees, unit.LatitudeDeg, unit.LongitudeDeg);
             if (distanceMeters >= MinimumObservedDisplacementMeters)
             {
                 var orderResult = requestLedger[pendingRequest.Key].Clone();
                 orderResult.Stage = Stage.MovementObserved;
-                orderResult.Reason = "displacement_after_native_task_creation";
+                orderResult.Reason = orderResult.RouteMode == RouteMode.LegacyIdle
+                    ? "displacement_after_native_task_creation" : "displacement_while_requested_route_head";
                 orderResult.DisplacementM = distanceMeters;
                 orderResult.SampledAtSeconds = gameFacade.OperationalSeconds;
                 PublishResult(orderResult);
@@ -254,6 +306,26 @@ public sealed class Provider
             }
         }
 
+        foreach (var pending in pendingLaunches.ToArray())
+        {
+            var progress = gameFacade.PollLaunch(pending.Value);
+            var result = requestLedger[pending.Key].Clone();
+            if (progress.SpawnedKey != "" && entityHandles.TryGetValue(progress.SpawnedKey, out var spawnedId))
+            {
+                result.SpawnedEntityId = spawnedId;
+            }
+            if (result.Stage != progress.Stage || result.SpawnedEntityId != requestLedger[pending.Key].SpawnedEntityId)
+            {
+                result.Stage = progress.Stage;
+                result.Reason = progress.Reason;
+                result.SampledAtSeconds = gameFacade.OperationalSeconds;
+                PublishResult(result);
+            }
+            if (progress.Stage == Stage.Airborne || progress.Stage == Stage.ExecutionUnknown)
+            {
+                pendingLaunches.Remove(pending.Key);
+            }
+        }
         var payload = snapshot.ToByteArray();
         if (payload.Length > MaximumSnapshotBytes)
         {
@@ -314,6 +386,34 @@ public sealed class Provider
             eligibility.Reason = "native_task_selection_active";
         }
 
+        return eligibility;
+    }
+
+    public static OrderEligibility RouteEligibility(UnitSample unit, RouteMode mode)
+    {
+        var eligibility = Eligibility(unit);
+        eligibility.Kind = mode == RouteMode.ReplaceRoute ? "replace_route" : "append_waypoint";
+        eligibility.ArgumentSemantics = "explicit route mode; isolated surface navigation; latitude/longitude degrees; preserve speed; bounded route";
+        if (eligibility.Reason == "native_task_selection_active")
+        {
+            eligibility.Availability = Availability.Executable;
+            eligibility.Reason = "";
+        }
+        if (eligibility.Availability == Availability.Executable && !unit.RouteSupported)
+        {
+            eligibility.Availability = Availability.Unsupported;
+            eligibility.Reason = "unsupported_route_unit_family";
+        }
+        if (eligibility.Availability == Availability.Executable && (!unit.RouteInspected || unit.RouteRestriction != ""))
+        {
+            eligibility.Availability = Availability.Blocked;
+            eligibility.Reason = unit.RouteRestriction == "" ? "navigation_context_unverified" : unit.RouteRestriction;
+        }
+        if (eligibility.Availability == Availability.Executable && mode == RouteMode.AppendWaypoint && unit.Route.Count >= 32)
+        {
+            eligibility.Availability = Availability.Blocked;
+            eligibility.Reason = "route_capacity";
+        }
         return eligibility;
     }
 
@@ -379,6 +479,36 @@ public sealed class Provider
         }
 
         var waypoint = request.Waypoint;
+        if (request.FacilityLaunch != null)
+        {
+            if (request.BasedOnVersion == 0 || request.BasedOnVersion > observationVersion
+                || observationVersion - request.BasedOnVersion > MaximumObservationAgeVersions)
+            {
+                Reject("stale_observation");
+                return;
+            }
+            var launch = request.FacilityLaunch;
+            if (launch.Count != 1 || string.IsNullOrWhiteSpace(launch.ClassKey) || string.IsNullOrWhiteSpace(launch.Squadron)
+                || string.IsNullOrWhiteSpace(launch.Loadout) || launch.ClassKey.Length > 128 || launch.Squadron.Length > 128 || launch.Loadout.Length > 128)
+            {
+                Reject("invalid_arguments");
+                return;
+            }
+            if (!unit.LaunchSupported || unit.LaunchRestriction != "")
+            {
+                Reject(unit.LaunchRestriction);
+                return;
+            }
+            var progress = gameFacade.LaunchFacility(unitKey, launch);
+            result.Stage = progress.Stage;
+            result.Reason = progress.Reason;
+            PublishResult(result);
+            if (progress.Stage == Stage.NativeTaskCreated && progress.Token != "")
+            {
+                pendingLaunches[request.RequestId] = progress.Token;
+            }
+            return;
+        }
         if (waypoint == null || !double.IsFinite(waypoint.LatitudeDeg) || !double.IsFinite(waypoint.LongitudeDeg)
             || Math.Abs(waypoint.LatitudeDeg) > MaximumLatitudeDegrees || Math.Abs(waypoint.LongitudeDeg) > MaximumLongitudeDegrees
             || Distance(unit.LatitudeDeg, unit.LongitudeDeg, waypoint.LatitudeDeg, waypoint.LongitudeDeg) > MaximumWaypointDistanceMeters)
@@ -394,7 +524,14 @@ public sealed class Provider
             return;
         }
 
-        var eligible = Eligibility(unit);
+        var mode = waypoint.RouteMode;
+        if (mode != RouteMode.LegacyIdle && mode != RouteMode.ReplaceRoute && mode != RouteMode.AppendWaypoint)
+        {
+            Reject("unsupported_route_mode");
+            return;
+        }
+
+        var eligible = mode == RouteMode.LegacyIdle ? Eligibility(unit) : RouteEligibility(unit, mode);
         if (eligible.Availability != Availability.Executable)
         {
             Reject(eligible.Reason);
@@ -402,6 +539,30 @@ public sealed class Provider
         }
 
         // Facade revalidates native membership/state once more adjacent to mutation.
+        if (mode != RouteMode.LegacyIdle)
+        {
+            var mutation = gameFacade.UpdateRoute(unitKey, waypoint.LatitudeDeg, waypoint.LongitudeDeg, "NC-" + request.RequestId, mode);
+            result.RouteMode = mode;
+            result.RouteBefore.Add(mutation.Before);
+            result.RouteAfter.Add(mutation.After);
+            result.Reason = mutation.Reason;
+            result.Stage = mutation.OutcomeUnknown ? Stage.ExecutionUnknown : mutation.Mutated ? Stage.RouteMutated : Stage.Rejected;
+            PublishResult(result);
+            if (mutation.Mutated)
+            {
+                // A replacement supersedes displacement attribution for the previous route.
+                if (mode == RouteMode.ReplaceRoute)
+                {
+                    foreach (var prior in pendingMovement.Where(entry => entry.Value.Key == unitKey).Select(entry => entry.Key).ToArray())
+                    {
+                        pendingMovement.Remove(prior);
+                    }
+                }
+                pendingMovement[request.RequestId] = (unitKey, unit.LatitudeDeg, unit.LongitudeDeg, true);
+            }
+            return;
+        }
+
         if (!gameFacade.AppendWaypoint(unitKey, waypoint.LatitudeDeg, waypoint.LongitudeDeg, "NC-" + request.RequestId))
         {
             Reject("native_dispatch_refused");
@@ -411,7 +572,7 @@ public sealed class Provider
         result.Stage = Stage.NativeTaskCreated;
         result.Reason = "native_task_membership_verified";
         PublishResult(result);
-        pendingMovement[request.RequestId] = (unitKey, unit.LatitudeDeg, unit.LongitudeDeg);
+        pendingMovement[request.RequestId] = (unitKey, unit.LatitudeDeg, unit.LongitudeDeg, false);
     }
 
     public static double Distance(double la, double lo, double lb, double lob)
@@ -429,8 +590,7 @@ public sealed class Provider
         double endLatitudeRadians = endLatitudeDegrees * Math.PI / DegreesPerHalfTurn;
         double latitudeDifferenceRadians = (endLatitudeDegrees - startLatitudeDegrees) * Math.PI / DegreesPerHalfTurn;
         double longitudeDifferenceRadians = (endLongitudeDegrees - startLongitudeDegrees) * Math.PI / DegreesPerHalfTurn;
-        double latitudeHaversineTerm = Math.Sin(latitudeDifferenceRadians / 2) * Math.Sin(latitudeDifferenceRadians / 2)
-    ;
+        double latitudeHaversineTerm = Math.Sin(latitudeDifferenceRadians / 2) * Math.Sin(latitudeDifferenceRadians / 2);
         double longitudeHaversineTerm = Math.Cos(startLatitudeRadians) * Math.Cos(endLatitudeRadians)
             * Math.Sin(longitudeDifferenceRadians / 2) * Math.Sin(longitudeDifferenceRadians / 2);
         double haversine = latitudeHaversineTerm + longitudeHaversineTerm;

@@ -96,5 +96,7 @@ static class Program
         provider.Tick();
         Check(Send(waypointRequest).Reason == "stale_session" && game.Mutations == 1, "reload_invalidation");
         Check(!provider.Enqueue(new byte[65537]), "message_bound");
+        MovementTests.Run();
+        LaunchTests.Run();
     }
 }

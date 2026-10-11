@@ -111,7 +111,7 @@ public sealed class Provider
         {
             Session = new Session
             {
-                SchemaVersion = 1,
+                SchemaVersion = 2,
                 Ready = false
             }
         };
@@ -172,7 +172,7 @@ public sealed class Provider
         {
             Session = new Session
             {
-                SchemaVersion = 1,
+                SchemaVersion = 2,
                 SessionId = sessionId,
                 ObserverId = observerId,
                 Ready = true
@@ -183,31 +183,44 @@ public sealed class Provider
         };
         foreach (var unit in units.Take(MaximumSnapshotItems))
         {
-            var wireUnit = new Unit
+            var wireUnit = new UnitInstance
             {
-                Id = entityHandles[unit.Key],
-                Name = unit.Name,
-                Position = new GeoPoint
+                Subject = new Subject { OwnUnitId = entityHandles[unit.Key] },
+                Display = new IdentityState { Name = new StringKnowledge { Known = unit.Name } },
+                Kinematics = new KinematicsState
                 {
-                    LatitudeDeg = unit.LatitudeDeg,
-                    LongitudeDeg = unit.LongitudeDeg
+                    Position = new PositionKnowledge
+                    {
+                        Known = new PositionObservation
+                        {
+                            Coordinates = new GeoPoint { LatitudeDeg = unit.LatitudeDeg, LongitudeDeg = unit.LongitudeDeg }
+                        }
+                    },
+                    SpeedMps = new DoubleKnowledge { Known = unit.SpeedMetersPerSecond }
                 },
-                SpeedMps = unit.SpeedMetersPerSecond,
-                SampledAtSeconds = gameFacade.OperationalSeconds
+                Observation = new ObservationMetadata { SampledAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds } },
+                // Equipment capture is not implemented. Unknown inventory never means unarmed.
+                Equipment = new ObservedEquipment { Coverage = CollectionCoverage.CoverageUnknown },
+                OrderEligibility = new OrderEligibilityState { Coverage = CollectionCoverage.CoverageComplete },
+                Navigation = new NavigationState { Inspected = new BoolKnowledge { Known = unit.RouteInspected } }
             };
-            wireUnit.Orders.Add(Eligibility(unit));
-            wireUnit.Orders.Add(RouteEligibility(unit, RouteMode.ReplaceRoute));
-            wireUnit.Orders.Add(RouteEligibility(unit, RouteMode.AppendWaypoint));
-            wireUnit.RouteInspected = unit.RouteInspected;
-            wireUnit.PlannedRoute.Add(unit.Route.Select(point => point.Clone()));
+            wireUnit.OrderEligibility.Items.Add(Eligibility(unit));
+            wireUnit.OrderEligibility.Items.Add(RouteEligibility(unit, RouteMode.ReplaceRoute));
+            wireUnit.OrderEligibility.Items.Add(RouteEligibility(unit, RouteMode.AppendWaypoint));
+            if (unit.RouteInspected || unit.Route.Count > 0)
+            {
+                var route = new Route();
+                route.Points.Add(unit.Route.Select(point => point.Clone()));
+                wireUnit.Navigation.PlannedRoute = new RouteKnowledge { Known = route };
+            }
             if (unit.Airborne.HasValue)
             {
-                wireUnit.Airborne = unit.Airborne.Value;
+                wireUnit.Aircraft = new AircraftState { Airborne = new BoolKnowledge { Known = unit.Airborne.Value } };
             }
             if (unit.LaunchSupported)
             {
                 bool hasExecutableOption = unit.Stocks.Any(stock => stock.LaunchOptions.Any(option => option.Availability == Availability.Executable));
-                wireUnit.Orders.Add(new OrderEligibility
+                wireUnit.OrderEligibility.Items.Add(new OrderEligibility
                 {
                     Kind = "facility_launch",
                     Availability = unit.LaunchRestriction == "" && hasExecutableOption ? Availability.Executable : Availability.Blocked,
@@ -215,12 +228,12 @@ public sealed class Provider
                     ArgumentSemantics = "one aircraft; own land airfield; exact stock class/squadron/loadout; native preparation and takeoff"
                 });
             }
-            snapshot.OwnUnits.Add(wireUnit);
+            snapshot.Instances.Add(wireUnit);
             if (unit.HasFacility || unit.Stocks.Count > 0)
             {
                 var facility = new Facility
                 {
-                    EntityId = wireUnit.Id,
+                    EntityId = wireUnit.Subject.OwnUnitId,
                     PendingOperations = (uint)Math.Max(0, unit.PendingOperations),
                     SampledAtSeconds = gameFacade.OperationalSeconds
                 };
@@ -254,16 +267,30 @@ public sealed class Provider
 
         foreach (var track in gameFacade.CaptureTracks().Take(MaximumSnapshotItems))
         {
-            snapshot.Tracks.Add(new Track
+            const string positionSource = "selected_plotting_table_detected_position_cache";
+            snapshot.Instances.Add(new UnitInstance
             {
-                Id = track.Key,
-                DetectedPosition = new GeoPoint
+                Subject = new Subject { TrackId = track.Key },
+                Kinematics = new KinematicsState
                 {
-                    LatitudeDeg = track.LatitudeDeg,
-                    LongitudeDeg = track.LongitudeDeg
+                    Position = new PositionKnowledge
+                    {
+                        Estimated = new PositionKnowledge.Types.Estimate
+                        {
+                            Value = new PositionObservation
+                            {
+                                Coordinates = new GeoPoint { LatitudeDeg = track.LatitudeDeg, LongitudeDeg = track.LongitudeDeg }
+                            },
+                            Source = positionSource
+                        }
+                    }
                 },
-                SampledAtSeconds = gameFacade.OperationalSeconds,
-                Provenance = "selected_plotting_table_detected_position_cache"
+                Observation = new ObservationMetadata
+                {
+                    SampledAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds },
+                    Provenance = new StringKnowledge { Known = positionSource }
+                },
+                Equipment = new ObservedEquipment { Coverage = CollectionCoverage.CoverageUnknown }
             });
         }
 
@@ -287,7 +314,7 @@ public sealed class Provider
                 pendingMovement[pendingRequest.Key] = (unit.Key, unit.LatitudeDeg, unit.LongitudeDeg, false);
                 continue;
             }
-            if (requestLedger[pendingRequest.Key].RouteMode != RouteMode.LegacyIdle
+            if (requestLedger[pendingRequest.Key].RouteMode != RouteMode.IdleWaypoint
                 && (!unit.RouteInspected || unit.Route.Count == 0 || unit.Route[0].Label != "NC-" + pendingRequest.Key))
             {
                 continue;
@@ -297,7 +324,7 @@ public sealed class Provider
             {
                 var orderResult = requestLedger[pendingRequest.Key].Clone();
                 orderResult.Stage = Stage.MovementObserved;
-                orderResult.Reason = orderResult.RouteMode == RouteMode.LegacyIdle
+                orderResult.Reason = orderResult.RouteMode == RouteMode.IdleWaypoint
                     ? "displacement_after_native_task_creation" : "displacement_while_requested_route_head";
                 orderResult.DisplacementM = distanceMeters;
                 orderResult.SampledAtSeconds = gameFacade.OperationalSeconds;
@@ -343,10 +370,8 @@ public sealed class Provider
         return payload;
     }
 
-    public static OrderEligibility Eligibility(UnitSample u)
+    public static OrderEligibility Eligibility(UnitSample unit)
     {
-        // Retain the public parameter name for named-argument compatibility.
-        var unit = u;
         var eligibility = new OrderEligibility
         {
             Kind = "set_waypoint",
@@ -473,7 +498,12 @@ public sealed class Provider
             return;
         }
 
-        var unitKey = entityHandles.FirstOrDefault(entry => entry.Value == request.EntityId).Key;
+        if (request.Subject == null || request.Subject.IdentityCase != Subject.IdentityOneofCase.OwnUnitId)
+        {
+            Reject("own_unit_subject_required");
+            return;
+        }
+        var unitKey = entityHandles.FirstOrDefault(entry => entry.Value == request.Subject.OwnUnitId).Key;
         var unit = unitKey == null ? null : gameFacade.Resolve(unitKey);
         if (unit == null || !unit.Own)
         {
@@ -528,13 +558,13 @@ public sealed class Provider
         }
 
         var mode = waypoint.RouteMode;
-        if (mode != RouteMode.LegacyIdle && mode != RouteMode.ReplaceRoute && mode != RouteMode.AppendWaypoint)
+        if (mode != RouteMode.IdleWaypoint && mode != RouteMode.ReplaceRoute && mode != RouteMode.AppendWaypoint)
         {
             Reject("unsupported_route_mode");
             return;
         }
 
-        var eligible = mode == RouteMode.LegacyIdle ? Eligibility(unit) : RouteEligibility(unit, mode);
+        var eligible = mode == RouteMode.IdleWaypoint ? Eligibility(unit) : RouteEligibility(unit, mode);
         if (eligible.Availability != Availability.Executable)
         {
             Reject(eligible.Reason);
@@ -542,7 +572,7 @@ public sealed class Provider
         }
 
         // Facade revalidates native membership/state once more adjacent to mutation.
-        if (mode != RouteMode.LegacyIdle)
+        if (mode != RouteMode.IdleWaypoint)
         {
             var mutation = gameFacade.UpdateRoute(unitKey, waypoint.LatitudeDeg, waypoint.LongitudeDeg, "NC-" + request.RequestId, mode);
             result.RouteMode = mode;

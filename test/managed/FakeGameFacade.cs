@@ -36,7 +36,8 @@ sealed class FakeGameFacade : IGameFacade
         },
         LaunchStage == Stage.AircraftSpawned || LaunchStage == Stage.Airborne ? Spawned : new UnitSample()
     };
-    public IReadOnlyList<TrackSample> CaptureTracks() => Array.Empty<TrackSample>();
+    public IReadOnlyList<TrackSample> Tracks = Array.Empty<TrackSample>();
+    public IReadOnlyList<TrackSample> CaptureTracks() => Tracks;
     public UnitSample Resolve(string key) => key == "own" ? Own : key == "spawn" ? Spawned : null;
     public bool AppendWaypoint(string key, double latitudeDegrees, double longitudeDegrees, string label)
     {

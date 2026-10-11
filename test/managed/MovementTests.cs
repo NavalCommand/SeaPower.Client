@@ -23,7 +23,7 @@ static class MovementTests
         OrderRequest Request(string id, RouteMode mode) => new()
         {
             SessionId = initial.Session.SessionId,
-            EntityId = initial.OwnUnits[0].Id,
+            Subject = new Subject { OwnUnitId = initial.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId },
             RequestId = id,
             BasedOnVersion = initial.ObservationVersion,
             Waypoint = new Waypoint { LatitudeDeg = 62, LongitudeDeg = -10.37, RouteMode = mode }
@@ -44,7 +44,7 @@ static class MovementTests
         var receipt = Send(replacement);
         Check(receipt.RouteBefore.Count == 3 && receipt.RouteAfter.Count == 1 && receipt.RouteAfter[0].Label == "NC-D", "replace_multiple_waypoints");
         Check(Send(replacement).RouteBefore.Count == 3 && game.Mutations == 4, "repeat_route_idempotency");
-        Check(Send(Request("legacy", RouteMode.LegacyIdle)).Reason == "native_task_selection_active", "legacy_never_destructive");
+        Check(Send(Request("legacy", RouteMode.IdleWaypoint)).Reason == "native_task_selection_active", "idle_waypoint_never_destructive");
         Check(Send(Request("unknown", (RouteMode)99)).Reason == "unsupported_route_mode", "unknown_mode_rejected");
         game.Own.Protected = true;
         Check(Send(Request("protected", RouteMode.ReplaceRoute)).Reason == "protected_native_action", "replace_protected");
@@ -85,7 +85,7 @@ static class MovementTests
         {
             SessionId = view.Session.SessionId,
             RequestId = "head",
-            EntityId = view.OwnUnits[0].Id,
+            Subject = new Subject { OwnUnitId = view.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId },
             BasedOnVersion = view.ObservationVersion,
             Waypoint = new Waypoint { LatitudeDeg = 62, LongitudeDeg = -10, RouteMode = RouteMode.ReplaceRoute }
         };

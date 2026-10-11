@@ -145,7 +145,7 @@ static class LaunchLifecycleTests
         {
             SessionId = initial.Session.SessionId,
             RequestId = "uncertain",
-            EntityId = initial.OwnUnits[0].Id,
+            Subject = new Subject { OwnUnitId = initial.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId },
             BasedOnVersion = initial.ObservationVersion,
             FacilityLaunch = new FacilityLaunch { ClassKey = "class", Squadron = "squadron", Loadout = "loadout", Count = 1 }
         };
@@ -180,7 +180,7 @@ static class LaunchLifecycleTests
         var view = WorldSnapshot.Parser.ParseFrom(provider.Tick());
         provider.Results.TryDequeue(out var spawnedBytes);
         var spawned = OrderResult.Parser.ParseFrom(spawnedBytes);
-        Check(view.OwnUnits.Any(unit => unit.Id == spawned.SpawnedEntityId), "uncertain_recovers_ordinary_unit");
+        Check(view.Instances.Any(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId && unit.Subject.OwnUnitId == spawned.SpawnedEntityId), "uncertain_recovers_ordinary_unit");
         provider.Invalidate();
         Check(game.LaunchResets == 1, "session_reset_calls_facade_cleanup");
         provider.Tick();
@@ -192,7 +192,7 @@ static class LaunchLifecycleTests
         var fresh = request.Clone();
         var current = WorldSnapshot.Parser.ParseFrom(provider.Tick());
         fresh.SessionId = current.Session.SessionId;
-        fresh.EntityId = current.OwnUnits[0].Id;
+        fresh.Subject.OwnUnitId = current.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId;
         fresh.BasedOnVersion = current.ObservationVersion;
         fresh.RequestId = "active";
         game.LaunchStage = Stage.ExecutionUnknown;
@@ -202,7 +202,7 @@ static class LaunchLifecycleTests
         Check(game.LaunchResets == 2, "reset_uncertain_launch_cleans_up");
         current = WorldSnapshot.Parser.ParseFrom(provider.Tick());
         fresh.SessionId = current.Session.SessionId;
-        fresh.EntityId = current.OwnUnits[0].Id;
+        fresh.Subject.OwnUnitId = current.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId;
         fresh.BasedOnVersion = current.ObservationVersion;
         game.LaunchAcceptance = Stage.NativeTaskCreated;
         game.LaunchStage = Stage.Preparing;
@@ -222,7 +222,7 @@ static class LaunchLifecycleTests
         {
             SessionId = snapshot.Session.SessionId,
             RequestId = "publication-failure",
-            EntityId = snapshot.OwnUnits[0].Id,
+            Subject = new Subject { OwnUnitId = snapshot.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId },
             BasedOnVersion = snapshot.ObservationVersion,
             FacilityLaunch = new FacilityLaunch { ClassKey = "class", Squadron = "squadron", Loadout = "loadout", Count = 1 }
         };

@@ -25,7 +25,7 @@ static class LaunchTests
         {
             SessionId = initial.Session.SessionId,
             RequestId = "launch",
-            EntityId = initial.OwnUnits[0].Id,
+            Subject = new Subject { OwnUnitId = initial.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId },
             BasedOnVersion = initial.ObservationVersion,
             FacilityLaunch = new FacilityLaunch { ClassKey = "class", Squadron = "squadron", Loadout = "loadout", Count = 1 }
         };
@@ -59,8 +59,8 @@ static class LaunchTests
         var spawnedView = WorldSnapshot.Parser.ParseFrom(provider.Tick());
         provider.Results.TryDequeue(out var spawnedBytes);
         var spawned = OrderResult.Parser.ParseFrom(spawnedBytes);
-        Check(spawned.Stage == Stage.AircraftSpawned && spawnedView.OwnUnits.Any(unit => unit.Id == spawned.SpawnedEntityId
-            && unit.HasAirborne && !unit.Airborne), "launch_spawn_regular_grounded_unit");
+        Check(spawned.Stage == Stage.AircraftSpawned && spawnedView.Instances.Any(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId && unit.Subject.OwnUnitId == spawned.SpawnedEntityId
+            && unit.Aircraft?.Airborne?.StateCase == BoolKnowledge.StateOneofCase.Known && !unit.Aircraft.Airborne.Known), "launch_spawn_regular_grounded_unit");
         game.LaunchStage = Stage.Airborne;
         game.Spawned.Grounded = false;
         game.Spawned.Airborne = true;

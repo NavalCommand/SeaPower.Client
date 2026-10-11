@@ -13,7 +13,7 @@ public sealed partial class NativeGameFacade : IGameFacade
     private const double MetersPerNauticalMile = 1852.0;
     private const double SecondsPerHour = 3600.0;
     private const int MaximumUnitSamplesWithOverflow = 129;
-    private const int MaximumTrackSamples = 128;
+    private const int MaximumTrackSamples = 129;
     private const int MaximumStockSamples = 12;
     // This inspected game build uses this lower bound for side-local foreign contact keys.
     private const int FirstForeignContactId = 7001;
@@ -21,7 +21,26 @@ public sealed partial class NativeGameFacade : IGameFacade
     private const int PreserveTelegraphSetting = -2;
     readonly Dictionary<ObjectBase, string> unitKeys = new();
     readonly Dictionary<string, ObjectBase> unitsByKey = new();
-    readonly Dictionary<int, string> trackHandles = new();
+    readonly Dictionary<Vehicle, string> contactKeys = new();
+    Taskforce sourceTaskforce;
+    GameMain sourceGame;
+    string sourceSessionKey = "";
+
+    public string SessionKey
+    {
+        get
+        {
+            AssertEngineThread();
+            var currentGame = Singleton<GameMain>.Instance;
+            if (!ReferenceEquals(sourceGame, currentGame) || !ReferenceEquals(sourceTaskforce, Globals._playerTaskforce))
+            {
+                sourceGame = currentGame;
+                sourceTaskforce = Globals._playerTaskforce;
+                sourceSessionKey = Guid.NewGuid().ToString("N");
+            }
+            return sourceSessionKey;
+        }
+    }
     void AssertEngineThread()
     {
         if (Globals.mainThread != Thread.CurrentThread)
@@ -54,7 +73,7 @@ public sealed partial class NativeGameFacade : IGameFacade
         AssertEngineThread();
         unitKeys.Clear();
         unitsByKey.Clear();
-        trackHandles.Clear();
+        contactKeys.Clear();
         ClearLaunches();
     }
 
@@ -73,6 +92,7 @@ public sealed partial class NativeGameFacade : IGameFacade
         {
             Key = unitKey,
             Name = nativeUnit.name,
+            TaskForceKey = SessionKey,
             Own = true,
             Supported = nativeUnit is Vessel || nativeUnit is Aircraft || nativeUnit is Helicopter,
             Controllable = nativeUnit.HasControl && nativeUnit.IsControllable && nativeUnit.AcceptsOrdersFromPlayer && nativeUnit._userRoot != null,
@@ -85,7 +105,9 @@ public sealed partial class NativeGameFacade : IGameFacade
             SelectedTask = nativeUnit._userRoot?.SelectedTask != null,
             LatitudeDeg = nativeUnit._geoPosition.Latitude,
             LongitudeDeg = nativeUnit._geoPosition.Longitude,
-            SpeedMetersPerSecond = nativeUnit._velocityInKnots * MetersPerNauticalMile / SecondsPerHour
+            SpeedMetersPerSecond = nativeUnit._velocityInKnots * MetersPerNauticalMile / SecondsPerHour,
+            // Heading is orientation, not course over ground. Reactive native value is degrees.
+            HeadingRadians = nativeUnit.transform != null ? nativeUnit.Heading.Value * Math.PI / 180.0 : null
         };
         var flightDeck = nativeUnit._obp?._flightDeck;
         InspectRoute(nativeUnit, sample);
@@ -106,24 +128,27 @@ public sealed partial class NativeGameFacade : IGameFacade
             sample.ReservedCount = (uint)flightDeck.FlightDeckTasks.OfType<PendingLaunchTask>().Sum(task => Math.Max(0, task.LaunchCount));
             sample.CooldownCount = (uint)flightDeck.FlightDeckTasks.OfType<CoolDownTask>().Count();
             sample.PendingOperations = flightDeck.FlightDeckTasks.Count;
-            sample.Truncated = flightDeck._vehiclesOnBoard.Sum(vehicle => vehicle.Squadrons.Count) > MaximumStockSamples
+            sample.Truncated = flightDeck._vehiclesOnBoard.Count() > MaximumStockSamples
+                || flightDeck._vehiclesOnBoard.Sum(vehicle => vehicle.Squadrons.Count) > MaximumStockSamples
                 || flightDeck._vehiclesOnBoard.Any(vehicle => vehicle.Loadouts.Count > MaximumStockSamples);
+            sample.InventoryCoverage = sample.Truncated ? CollectionCoverage.CoveragePartial : CollectionCoverage.CoverageComplete;
             foreach (var vehicleType in flightDeck._vehiclesOnBoard.OrderByDescending(vehicle => vehicle.Numbers > 0).Take(MaximumStockSamples))
             {
-                foreach (var squadron in vehicleType.Squadrons.OrderByDescending(squadron => squadron.Numbers > 0).Take(MaximumStockSamples - sample.Stocks.Count))
+                foreach (var squadron in vehicleType.Squadrons.OrderByDescending(squadron => squadron.Numbers > 0).Take(MaximumStockSamples - sample.AircraftInventory.Count))
                 {
-                    var stock = new StockSample
+                    var stock = new AircraftInventorySample
                     {
                         ClassKey = vehicleType._fileName,
                         Squadron = squadron._name,
                         Count = squadron.Numbers
                     };
+                    stock.Loadouts.AddRange(vehicleType.Loadouts.Take(MaximumStockSamples).Select(loadout => loadout.Name));
                     if (sample.LaunchSupported)
                     {
                         foreach (var loadout in vehicleType.Loadouts.Take(MaximumStockSamples))
                         {
                             string restriction = LaunchRestriction(nativeUnit, vehicleType, squadron, loadout);
-                            stock.LaunchOptions.Add(new LaunchOption
+                            stock.LaunchOptions.Add(new AircraftInventorySample.LaunchOptionSample
                             {
                                 Loadout = loadout.Name,
                                 Availability = restriction == "" ? Availability.Executable : Availability.Blocked,
@@ -131,7 +156,7 @@ public sealed partial class NativeGameFacade : IGameFacade
                             });
                         }
                     }
-                    sample.Stocks.Add(stock);
+                    sample.AircraftInventory.Add(stock);
                 }
             }
         }
@@ -174,25 +199,28 @@ public sealed partial class NativeGameFacade : IGameFacade
     {
         AssertEngineThread();
         var trackSamples = new List<TrackSample>();
-        foreach (var contact in Globals._playerTaskforce.PlottingTable.Vehicles.Where(contact => contact.Id >= FirstForeignContactId).Take(MaximumTrackSamples))
+        var contacts = Globals._playerTaskforce.PlottingTable.Vehicles
+            .Where(contact => contact.Id >= FirstForeignContactId).ToArray();
+        foreach (var removedContact in contactKeys.Keys.Where(contact => !contacts.Contains(contact)).ToArray())
         {
+            contactKeys.Remove(removedContact);
+        }
+        foreach (var contact in contacts.Take(MaximumTrackSamples))
+        {
+            // Use the plotting record's lifetime, never its reusable numeric ID or hidden BaseObject.
+            if (!contactKeys.TryGetValue(contact, out var contactKey))
+            {
+                contactKey = Guid.NewGuid().ToString("N");
+                contactKeys[contact] = contactKey;
+            }
             var detected = contact.DetectedPosition;
-            if (!detected.HasValue)
-            {
-                continue;
-            }
-
-            if (!trackHandles.TryGetValue(contact.Id, out var trackId))
-            {
-                trackId = Guid.NewGuid().ToString("N");
-                trackHandles[contact.Id] = trackId;
-            }
 
             trackSamples.Add(new TrackSample
             {
-                Key = trackId,
-                LatitudeDeg = detected.Value.Item1.Latitude,
-                LongitudeDeg = detected.Value.Item1.Longitude
+                Key = contactKey,
+                PositionAvailable = detected.HasValue,
+                LatitudeDeg = detected.HasValue ? detected.Value.Item1.Latitude : 0,
+                LongitudeDeg = detected.HasValue ? detected.Value.Item1.Longitude : 0
             });
         }
 

@@ -8,7 +8,7 @@ using NavalCommand.Gateway.Wire;
 
 namespace NavalCommand.SeaPower.Client;
 // Engine thread owns facade, handles and ledger. I/O sees immutable byte arrays only.
-// No simulator references cross queues. Serialization is bounded to 128 units/tracks.
+// No simulator references cross queues. Serialization is bounded per native source.
 public sealed class Provider
 {
     private const int MaximumOrderBytes = 65_536;
@@ -27,13 +27,17 @@ public sealed class Provider
     readonly IGameFacade gameFacade;
     readonly int ownerThreadId;
     readonly string observerId;
-    readonly Dictionary<string, string> entityHandles = new();
+    readonly Dictionary<string, string> ownHandles = new();
+    readonly Dictionary<string, string> contactHandles = new();
+    readonly Dictionary<string, string> controlledKeysByHandle = new();
+    readonly Dictionary<string, string> taskForceHandles = new();
     readonly Dictionary<string, OrderResult> requestLedger = new();
     readonly Dictionary<string, (string Key, double LatitudeDegrees, double LongitudeDegrees, bool AwaitingActivation)> pendingMovement = new();
     readonly Dictionary<string, string> pendingLaunches = new();
     readonly ConcurrentQueue<byte[]> commandQueue = new();
     readonly ConcurrentQueue<byte[]> snapshotQueue = new();
     string sessionId = "";
+    string sourceSessionKey = "";
     ulong observationVersion;
     int queuedCommandCount;
     public Provider(IGameFacade game, string observer)
@@ -89,7 +93,11 @@ public sealed class Provider
         AssertEngineThread();
         sessionId = "";
         observationVersion = 0;
-        entityHandles.Clear();
+        sourceSessionKey = "";
+        ownHandles.Clear();
+        contactHandles.Clear();
+        controlledKeysByHandle.Clear();
+        taskForceHandles.Clear();
         requestLedger.Clear();
         pendingMovement.Clear();
         pendingLaunches.Clear();
@@ -111,11 +119,11 @@ public sealed class Provider
         {
             Session = new Session
             {
-                SchemaVersion = 2,
+                SchemaVersion = 3,
                 Ready = false
             }
         };
-        snapshotQueue.Enqueue(snapshot.ToByteArray());
+        snapshotQueue.Enqueue(new ProviderObservation { Snapshot = snapshot }.ToByteArray());
     }
 
     public byte[] Tick()
@@ -131,24 +139,25 @@ public sealed class Provider
             return null;
         }
 
+        string currentSourceSessionKey = gameFacade.SessionKey;
+        if (sessionId != "" && currentSourceSessionKey != sourceSessionKey)
+        {
+            Invalidate();
+        }
+        sourceSessionKey = currentSourceSessionKey;
         if (sessionId == "")
         {
             sessionId = Guid.NewGuid().ToString("N");
         }
 
         var units = gameFacade.CaptureUnits().Where(unit => unit.Own).Take(MaximumSnapshotItems + 1).ToArray();
-        var currentUnitKeys = new HashSet<string>(units.Take(MaximumSnapshotItems).Select(unit => unit.Key));
-        foreach (var key in entityHandles.Keys.Where(candidateUnitKey => !currentUnitKeys.Contains(candidateUnitKey)).ToArray())
+        var contacts = gameFacade.CaptureTracks().Take(MaximumSnapshotItems + 1).ToArray();
+        UpdateHandles(ownHandles, units.Take(MaximumSnapshotItems).Select(unit => unit.Key));
+        UpdateHandles(contactHandles, contacts.Take(MaximumSnapshotItems).Select(contact => contact.Key));
+        controlledKeysByHandle.Clear();
+        foreach (var handle in ownHandles)
         {
-            entityHandles.Remove(key);
-        }
-
-        foreach (var unit in units.Take(MaximumSnapshotItems))
-        {
-            if (!entityHandles.ContainsKey(unit.Key))
-            {
-                entityHandles[unit.Key] = Guid.NewGuid().ToString("N");
-            }
+            controlledKeysByHandle.Add(handle.Value, handle.Key);
         }
 
         // Process bounded commands before publishing a new version.
@@ -172,20 +181,22 @@ public sealed class Provider
         {
             Session = new Session
             {
-                SchemaVersion = 2,
+                SchemaVersion = 3,
                 SessionId = sessionId,
                 ObserverId = observerId,
                 Ready = true
             },
             ObservationVersion = ++observationVersion,
             OperationalSeconds = gameFacade.OperationalSeconds,
-            Truncated = units.Length > MaximumSnapshotItems || units.Any(unit => unit.Truncated)
+            Truncated = units.Length > MaximumSnapshotItems || contacts.Length > MaximumSnapshotItems || units.Any(unit => unit.Truncated),
+            Memberships = new ObservedMemberships { Coverage = CollectionCoverage.CoverageUnknown },
         };
+        var observation = new ProviderObservation { Snapshot = snapshot };
         foreach (var unit in units.Take(MaximumSnapshotItems))
         {
             var wireUnit = new UnitInstance
             {
-                Subject = new Subject { OwnUnitId = entityHandles[unit.Key] },
+                UnitId = new UnitId { Value = ownHandles[unit.Key] },
                 Display = new IdentityState { Name = new StringKnowledge { Known = unit.Name } },
                 Kinematics = new KinematicsState
                 {
@@ -198,16 +209,29 @@ public sealed class Provider
                     },
                     SpeedMps = new DoubleKnowledge { Known = unit.SpeedMetersPerSecond }
                 },
-                Observation = new ObservationMetadata { SampledAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds } },
+                Observation = new ObservationMetadata { MeasuredAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds } },
                 // Equipment capture is not implemented. Unknown inventory never means unarmed.
                 Equipment = new ObservedEquipment { Coverage = CollectionCoverage.CoverageUnknown },
-                OrderEligibility = new OrderEligibilityState { Coverage = CollectionCoverage.CoverageComplete },
-                Navigation = new NavigationState { Inspected = new BoolKnowledge { Known = unit.RouteInspected } }
+                Navigation = new NavigationState()
             };
-            wireUnit.OrderEligibility.Items.Add(Eligibility(unit));
-            wireUnit.OrderEligibility.Items.Add(RouteEligibility(unit, RouteMode.ReplaceRoute));
-            wireUnit.OrderEligibility.Items.Add(RouteEligibility(unit, RouteMode.AppendWaypoint));
-            if (unit.RouteInspected || unit.Route.Count > 0)
+            if (unit.HeadingRadians.HasValue)
+            {
+                wireUnit.Kinematics.HeadingRad = new DoubleKnowledge { Known = unit.HeadingRadians.Value };
+            }
+            var discovery = new OrderDiscovery
+            {
+                SessionId = sessionId,
+                UnitId = wireUnit.UnitId.Clone(),
+                BasedOnVersion = snapshot.ObservationVersion,
+                Eligibility = new OrderEligibilityState
+                {
+                    Coverage = unit.Truncated ? CollectionCoverage.CoveragePartial : CollectionCoverage.CoverageComplete
+                }
+            };
+            discovery.Eligibility.Items.Add(Eligibility(unit));
+            discovery.Eligibility.Items.Add(RouteEligibility(unit, RouteMode.ReplaceRoute));
+            discovery.Eligibility.Items.Add(RouteEligibility(unit, RouteMode.AppendWaypoint));
+            if (unit.RouteInspected)
             {
                 var route = new Route();
                 route.Points.Add(unit.Route.Select(point => point.Clone()));
@@ -219,58 +243,66 @@ public sealed class Provider
             }
             if (unit.LaunchSupported)
             {
-                bool hasExecutableOption = unit.Stocks.Any(stock => stock.LaunchOptions.Any(option => option.Availability == Availability.Executable));
-                wireUnit.OrderEligibility.Items.Add(new OrderEligibility
-                {
-                    Kind = "facility_launch",
-                    Availability = unit.LaunchRestriction == "" && hasExecutableOption ? Availability.Executable : Availability.Blocked,
-                    Reason = unit.LaunchRestriction != "" ? unit.LaunchRestriction : hasExecutableOption ? "" : "no_executable_launch_option",
-                    ArgumentSemantics = "one aircraft; own land airfield; exact stock class/squadron/loadout; native preparation and takeoff"
-                });
+                AddLaunchAvailability(discovery.Eligibility, unit);
             }
-            snapshot.Instances.Add(wireUnit);
-            if (unit.HasFacility || unit.Stocks.Count > 0)
+            observation.OrderAvailability.Add(discovery);
+            if (unit.HasFacility)
             {
-                var facility = new Facility
+                wireUnit.AirOperations = new AirOperations
                 {
-                    EntityId = wireUnit.Subject.OwnUnitId,
-                    PendingOperations = (uint)Math.Max(0, unit.PendingOperations),
-                    SampledAtSeconds = gameFacade.OperationalSeconds
+                    Inventory = new AircraftInventory { Coverage = unit.InventoryCoverage },
+                    PendingOperations = new UInt32Knowledge { Known = (uint)Math.Max(0, unit.PendingOperations) },
+                    MeasuredAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds }
                 };
                 if (unit.OnboardCount.HasValue)
                 {
-                    facility.OnboardCount = unit.OnboardCount.Value;
+                    wireUnit.AirOperations.OnboardCount = new UInt32Knowledge { Known = unit.OnboardCount.Value };
                 }
                 if (unit.ReservedCount.HasValue)
                 {
-                    facility.ReservedCount = unit.ReservedCount.Value;
+                    wireUnit.AirOperations.ReservedCount = new UInt32Knowledge { Known = unit.ReservedCount.Value };
                 }
                 if (unit.CooldownCount.HasValue)
                 {
-                    facility.CooldownCount = unit.CooldownCount.Value;
+                    wireUnit.AirOperations.CooldownCount = new UInt32Knowledge { Known = unit.CooldownCount.Value };
                 }
-                foreach (var stock in unit.Stocks.Take(MaximumStocksPerFacility))
+                foreach (var inventory in unit.AircraftInventory.Take(MaximumStocksPerFacility))
                 {
-                    var wireStock = new Stock
+                    var entry = new AircraftInventoryEntry
                     {
-                        ClassKey = stock.ClassKey,
-                        Squadron = stock.Squadron,
-                        UnreservedCount = (uint)Math.Max(0, stock.Count)
+                        UnitTypeId = new UnitTypeId { Value = inventory.ClassKey },
+                        Squadron = inventory.Squadron
                     };
-                    wireStock.LaunchOptions.Add(stock.LaunchOptions);
-                    facility.Stocks.Add(wireStock);
+                    if (inventory.Count.HasValue)
+                    {
+                        entry.UnreservedCount = new UInt32Knowledge { Known = (uint)Math.Max(0, inventory.Count.Value) };
+                    }
+                    entry.Loadouts.Add(inventory.Loadouts.Select(loadout => new LoadoutId { Value = loadout }));
+                    wireUnit.AirOperations.Inventory.Items.Add(entry);
                 }
-
-                snapshot.Facilities.Add(facility);
             }
+            if (!string.IsNullOrEmpty(unit.TaskForceKey))
+            {
+                if (!taskForceHandles.TryGetValue(unit.TaskForceKey, out string taskForceHandle))
+                {
+                    taskForceHandle = Guid.NewGuid().ToString("N");
+                    taskForceHandles.Add(unit.TaskForceKey, taskForceHandle);
+                }
+                snapshot.Memberships.Coverage = CollectionCoverage.CoveragePartial;
+                snapshot.Memberships.Items.Add(new UnitMembership
+                {
+                    UnitId = wireUnit.UnitId.Clone(),
+                    TaskForce = new StringKnowledge { Known = taskForceHandle }
+                });
+            }
+            snapshot.Instances.Add(wireUnit);
         }
 
-        foreach (var track in gameFacade.CaptureTracks().Take(MaximumSnapshotItems))
+        foreach (var contact in contacts.Take(MaximumSnapshotItems).Where(contact => contact.PositionAvailable))
         {
-            const string positionSource = "selected_plotting_table_detected_position_cache";
             snapshot.Instances.Add(new UnitInstance
             {
-                Subject = new Subject { TrackId = track.Key },
+                UnitId = new UnitId { Value = contactHandles[contact.Key] },
                 Kinematics = new KinematicsState
                 {
                     Position = new PositionKnowledge
@@ -279,17 +311,13 @@ public sealed class Provider
                         {
                             Value = new PositionObservation
                             {
-                                Coordinates = new GeoPoint { LatitudeDeg = track.LatitudeDeg, LongitudeDeg = track.LongitudeDeg }
-                            },
-                            Source = positionSource
+                                Coordinates = new GeoPoint { LatitudeDeg = contact.LatitudeDeg, LongitudeDeg = contact.LongitudeDeg }
+                            }
                         }
                     }
                 },
-                Observation = new ObservationMetadata
-                {
-                    SampledAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds },
-                    Provenance = new StringKnowledge { Known = positionSource }
-                },
+                // Cached position has no verified sensor identity or measurement epoch.
+                Observation = new ObservationMetadata(),
                 Equipment = new ObservedEquipment { Coverage = CollectionCoverage.CoverageUnknown }
             });
         }
@@ -337,9 +365,9 @@ public sealed class Provider
         {
             var progress = gameFacade.PollLaunch(pending.Value);
             var result = requestLedger[pending.Key].Clone();
-            if (progress.SpawnedKey != "" && entityHandles.TryGetValue(progress.SpawnedKey, out var spawnedId))
+            if (progress.SpawnedKey != "" && ownHandles.TryGetValue(progress.SpawnedKey, out var spawnedId))
             {
-                result.SpawnedEntityId = spawnedId;
+                result.SpawnedUnitId = new UnitId { Value = spawnedId };
             }
             // Tracking ownership must survive publication backpressure. Terminal
             // native records are already released and must never be polled again.
@@ -348,7 +376,7 @@ public sealed class Provider
                 pendingLaunches.Remove(pending.Key);
             }
             if (result.Stage != progress.Stage || result.Reason != progress.Reason
-                || result.SpawnedEntityId != requestLedger[pending.Key].SpawnedEntityId)
+                || !Equals(result.SpawnedUnitId, requestLedger[pending.Key].SpawnedUnitId))
             {
                 result.Stage = progress.Stage;
                 result.Reason = progress.Reason;
@@ -356,7 +384,7 @@ public sealed class Provider
                 PublishResult(result);
             }
         }
-        var payload = snapshot.ToByteArray();
+        var payload = observation.ToByteArray();
         if (payload.Length > MaximumSnapshotBytes)
         {
             throw new InvalidOperationException("snapshot_too_large");
@@ -370,13 +398,64 @@ public sealed class Provider
         return payload;
     }
 
+    static void UpdateHandles(Dictionary<string, string> handles, IEnumerable<string> sourceKeys)
+    {
+        var currentKeys = new HashSet<string>(sourceKeys);
+        foreach (string removedKey in handles.Keys.Where(key => !currentKeys.Contains(key)).ToArray())
+        {
+            handles.Remove(removedKey);
+        }
+        foreach (string key in currentKeys)
+        {
+            if (!handles.ContainsKey(key))
+            {
+                handles.Add(key, Guid.NewGuid().ToString("N"));
+            }
+        }
+    }
+
+    static void AddLaunchAvailability(OrderEligibilityState availability, UnitSample unit)
+    {
+        int initialCount = availability.Items.Count;
+        foreach (var inventory in unit.AircraftInventory.Take(MaximumStocksPerFacility))
+        {
+            foreach (var option in inventory.LaunchOptions)
+            {
+                availability.Items.Add(new OrderEligibility
+                {
+                    Kind = OrderKind.LaunchAircraft,
+                    LaunchOption = new AircraftLaunch
+                    {
+                        UnitTypeId = new UnitTypeId { Value = inventory.ClassKey },
+                        Squadron = inventory.Squadron,
+                        LoadoutId = new LoadoutId { Value = option.Loadout },
+                        Count = 1
+                    },
+                    Availability = unit.LaunchRestriction == "" ? option.Availability : Availability.Blocked,
+                    Reason = unit.LaunchRestriction == "" ? option.Reason : unit.LaunchRestriction
+                });
+            }
+        }
+        if (availability.Items.Count == initialCount)
+        {
+            bool knownEmptyInventory = unit.InventoryCoverage == CollectionCoverage.CoverageComplete
+                && unit.AircraftInventory.Count == 0;
+            availability.Items.Add(new OrderEligibility
+            {
+                Kind = OrderKind.LaunchAircraft,
+                Availability = unit.LaunchRestriction != "" || knownEmptyInventory ? Availability.Blocked : Availability.Unknown,
+                Reason = unit.LaunchRestriction != "" ? unit.LaunchRestriction
+                    : knownEmptyInventory ? "inventory_unavailable" : "launch_options_unknown"
+            });
+        }
+    }
+
     public static OrderEligibility Eligibility(UnitSample unit)
     {
         var eligibility = new OrderEligibility
         {
-            Kind = "set_waypoint",
-            Availability = Availability.Executable,
-            ArgumentSemantics = "append; latitude/longitude degrees; current altitude; native telegraph 2; isolated unit only"
+            Kind = OrderKind.IdleWaypoint,
+            Availability = Availability.Executable
         };
         if (!unit.Supported)
         {
@@ -420,8 +499,7 @@ public sealed class Provider
     public static OrderEligibility RouteEligibility(UnitSample unit, RouteMode mode)
     {
         var eligibility = Eligibility(unit);
-        eligibility.Kind = mode == RouteMode.ReplaceRoute ? "replace_route" : "append_waypoint";
-        eligibility.ArgumentSemantics = "explicit route mode; isolated surface navigation; latitude/longitude degrees; preserve speed; bounded route";
+        eligibility.Kind = mode == RouteMode.ReplaceRoute ? OrderKind.ReplaceRoute : OrderKind.AppendRoute;
         if (eligibility.Reason == "native_task_selection_active")
         {
             eligibility.Availability = Availability.Executable;
@@ -498,13 +576,12 @@ public sealed class Provider
             return;
         }
 
-        if (request.Subject == null || request.Subject.IdentityCase != Subject.IdentityOneofCase.OwnUnitId)
+        if (request.UnitId == null || !controlledKeysByHandle.TryGetValue(request.UnitId.Value, out var unitKey))
         {
-            Reject("own_unit_subject_required");
+            Reject("wrong_side_or_invalid_entity");
             return;
         }
-        var unitKey = entityHandles.FirstOrDefault(entry => entry.Value == request.Subject.OwnUnitId).Key;
-        var unit = unitKey == null ? null : gameFacade.Resolve(unitKey);
+        var unit = gameFacade.Resolve(unitKey);
         if (unit == null || !unit.Own)
         {
             Reject("wrong_side_or_invalid_entity");
@@ -512,7 +589,7 @@ public sealed class Provider
         }
 
         var waypoint = request.Waypoint;
-        if (request.FacilityLaunch != null)
+        if (request.AircraftLaunch != null)
         {
             if (request.BasedOnVersion == 0 || request.BasedOnVersion > observationVersion
                 || observationVersion - request.BasedOnVersion > MaximumObservationAgeVersions)
@@ -520,16 +597,17 @@ public sealed class Provider
                 Reject("stale_observation");
                 return;
             }
-            var launch = request.FacilityLaunch;
-            if (launch.Count != 1 || string.IsNullOrWhiteSpace(launch.ClassKey) || string.IsNullOrWhiteSpace(launch.Squadron)
-                || string.IsNullOrWhiteSpace(launch.Loadout) || launch.ClassKey.Length > 128 || launch.Squadron.Length > 128 || launch.Loadout.Length > 128)
+            var launch = request.AircraftLaunch;
+            if (launch.Count != 1 || launch.UnitTypeId == null || string.IsNullOrWhiteSpace(launch.UnitTypeId.Value)
+                || string.IsNullOrWhiteSpace(launch.Squadron) || launch.LoadoutId == null || string.IsNullOrWhiteSpace(launch.LoadoutId.Value)
+                || launch.UnitTypeId.Value.Length > 128 || launch.Squadron.Length > 128 || launch.LoadoutId.Value.Length > 128)
             {
                 Reject("invalid_arguments");
                 return;
             }
             if (!unit.LaunchSupported || unit.LaunchRestriction != "")
             {
-                Reject(unit.LaunchRestriction);
+                Reject(unit.LaunchRestriction == "" ? "unsupported_facility" : unit.LaunchRestriction);
                 return;
             }
             var progress = gameFacade.LaunchFacility(unitKey, launch);

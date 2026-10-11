@@ -107,11 +107,12 @@ public sealed partial class NativeGameFacade
         return supportedPath ? "" : "launch_layout_unsupported";
     }
 
-    public LaunchProgress LaunchFacility(string key, FacilityLaunch request)
+    public LaunchProgress LaunchFacility(string key, AircraftLaunch request)
     {
         AssertEngineThread();
         var result = new LaunchProgress();
-        if (request == null || request.Count != 1 || request.ClassKey.Length > 128 || request.Squadron.Length > 128 || request.Loadout.Length > 128)
+        if (request == null || request.Count != 1 || request.UnitTypeId == null || request.LoadoutId == null
+            || request.UnitTypeId.Value.Length > 128 || request.Squadron.Length > 128 || request.LoadoutId.Value.Length > 128)
         {
             result.Reason = "invalid_arguments";
             return result;
@@ -121,9 +122,9 @@ public sealed partial class NativeGameFacade
             return result;
         }
         var deck = facility._obp?._flightDeck;
-        var vehicle = deck?._vehiclesOnBoard.FirstOrDefault(candidate => candidate._fileName == request.ClassKey);
+        var vehicle = deck?._vehiclesOnBoard.FirstOrDefault(candidate => candidate._fileName == request.UnitTypeId.Value);
         var squadron = vehicle?.Squadrons.FirstOrDefault(candidate => candidate._name == request.Squadron);
-        var loadout = vehicle?.Loadouts.FirstOrDefault(candidate => candidate.Name == request.Loadout);
+        var loadout = vehicle?.Loadouts.FirstOrDefault(candidate => candidate.Name == request.LoadoutId.Value);
         result.Reason = LaunchRestriction(facility, vehicle, squadron, loadout);
         if (result.Reason != "")
         {

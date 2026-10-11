@@ -14,12 +14,18 @@ public interface IGameFacade
         get;
     }
 
+    // Changes when native game or observer ownership context changes, even if ready.
+    string SessionKey
+    {
+        get;
+    }
+
     IReadOnlyList<UnitSample> CaptureUnits();
     IReadOnlyList<TrackSample> CaptureTracks();
     UnitSample Resolve(string key);
     bool AppendWaypoint(string key, double latitudeDeg, double longitudeDeg, string label);
     RouteMutation UpdateRoute(string key, double latitudeDeg, double longitudeDeg, string label, NavalCommand.Gateway.Wire.RouteMode mode);
-    LaunchProgress LaunchFacility(string key, NavalCommand.Gateway.Wire.FacilityLaunch request);
+    LaunchProgress LaunchFacility(string key, NavalCommand.Gateway.Wire.AircraftLaunch request);
     LaunchProgress PollLaunch(string token);
     void Reset();
 }

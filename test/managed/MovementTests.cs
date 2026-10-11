@@ -19,11 +19,11 @@ static class MovementTests
     {
         var game = new FakeGameFacade();
         var provider = new Provider(game, "observer");
-        var initial = WorldSnapshot.Parser.ParseFrom(provider.Tick());
+        var initial = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         OrderRequest Request(string id, RouteMode mode) => new()
         {
             SessionId = initial.Session.SessionId,
-            Subject = new Subject { OwnUnitId = initial.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId },
+            UnitId = initial.Instances[0].UnitId.Clone(),
             RequestId = id,
             BasedOnVersion = initial.ObservationVersion,
             Waypoint = new Waypoint { LatitudeDeg = 62, LongitudeDeg = -10.37, RouteMode = mode }
@@ -58,7 +58,7 @@ static class MovementTests
         game.Own.Own = false;
         Check(Send(Request("unauthorized", RouteMode.ReplaceRoute)).Reason == "wrong_side_or_invalid_entity", "route_wrong_side");
         game.Own.Own = true;
-        initial = WorldSnapshot.Parser.ParseFrom(provider.Tick());
+        initial = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         Check(game.Mutations == 4 && game.Own.Route[0].Label == "NC-D", "negative_zero_mutations");
         Check(Provider.RouteEligibility(game.Own, RouteMode.AppendWaypoint).Availability == Availability.Executable, "moving_discovery");
         game.Own.Formation = true;
@@ -68,11 +68,25 @@ static class MovementTests
         Check(Send(Request("race", RouteMode.ReplaceRoute)).Reason == "protected_native_action" && game.Mutations == 4, "adjacent_mutation_revalidation");
         game.BeforeRouteMutation = null;
         game.Own.Protected = false;
+        game.BeforeRouteMutation = () => game.Own.Own = false;
+        Check(Send(Request("side-race", RouteMode.ReplaceRoute)).Reason == "wrong_side_or_invalid_entity"
+            && game.Mutations == 4, "route_adjacent_current_side_revalidation");
+        game.BeforeRouteMutation = null;
+        game.Own.Own = true;
         while (game.Own.Route.Count < 32)
         {
             game.Own.Route.Add(new RoutePoint { Label = "capacity" });
         }
         Check(Send(Request("capacity", RouteMode.AppendWaypoint)).Reason == "route_capacity" && game.Mutations == 4, "route_bound");
+        var future = Request("future-observation", RouteMode.ReplaceRoute);
+        future.BasedOnVersion = initial.ObservationVersion + 100;
+        Check(Send(future).Reason == "stale_observation" && game.Mutations == 4, "future_observation_rejected");
+        var expired = Request("expired-observation", RouteMode.ReplaceRoute);
+        for (int tick = 0; tick < 21; tick++)
+        {
+            provider.Tick();
+        }
+        Check(Send(expired).Reason == "stale_observation" && game.Mutations == 4, "aged_observation_rejected");
         QueuedMovement();
     }
 
@@ -80,12 +94,12 @@ static class MovementTests
     {
         var game = new FakeGameFacade();
         var provider = new Provider(game, "own");
-        var view = WorldSnapshot.Parser.ParseFrom(provider.Tick());
+        var view = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         var request = new OrderRequest
         {
             SessionId = view.Session.SessionId,
             RequestId = "head",
-            Subject = new Subject { OwnUnitId = view.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId },
+            UnitId = view.Instances[0].UnitId.Clone(),
             BasedOnVersion = view.ObservationVersion,
             Waypoint = new Waypoint { LatitudeDeg = 62, LongitudeDeg = -10, RouteMode = RouteMode.ReplaceRoute }
         };

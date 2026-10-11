@@ -12,7 +12,7 @@
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/LaunchProgress.cs" Link="LaunchProgress.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/LaunchLifecycle.cs" Link="LaunchLifecycle.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/UnitSample.cs" Link="UnitSample.cs" />
-    <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/StockSample.cs" Link="StockSample.cs" />
+    <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/AircraftInventorySample.cs" Link="AircraftInventorySample.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/TrackSample.cs" Link="TrackSample.cs" />
     <ProjectReference Include="$(GatewayApiSource)/managed/Gateway.Api.csproj" />
   </ItemGroup>

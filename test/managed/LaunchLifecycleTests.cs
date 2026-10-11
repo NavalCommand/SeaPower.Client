@@ -140,14 +140,18 @@ static class LaunchLifecycleTests
         game.Own.LaunchSupported = true;
         game.Own.LaunchRestriction = "";
         var provider = new Provider(game, "own");
-        var initial = WorldSnapshot.Parser.ParseFrom(provider.Tick());
+        var initial = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         var request = new OrderRequest
         {
             SessionId = initial.Session.SessionId,
             RequestId = "uncertain",
-            Subject = new Subject { OwnUnitId = initial.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId },
+            UnitId = initial.Instances[0].UnitId.Clone(),
             BasedOnVersion = initial.ObservationVersion,
-            FacilityLaunch = new FacilityLaunch { ClassKey = "class", Squadron = "squadron", Loadout = "loadout", Count = 1 }
+            AircraftLaunch = new AircraftLaunch
+            {
+                UnitTypeId = new UnitTypeId { Value = "class" }, Squadron = "squadron",
+                LoadoutId = new LoadoutId { Value = "loadout" }, Count = 1
+            }
         };
         OrderResult Send(OrderRequest command)
         {
@@ -173,26 +177,26 @@ static class LaunchLifecycleTests
         Check(game.LaunchPolls == terminalPollCount, "provider_stops_polling_terminal_unknown");
         Check(Send(request).Stage == Stage.ExecutionUnknown && game.LaunchMutations == 1, "terminal_duplicate_no_retry");
         request.RequestId = "uncertain-recovery";
-        request.BasedOnVersion = WorldSnapshot.Parser.ParseFrom(provider.Tick()).ObservationVersion;
+        request.BasedOnVersion = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot.ObservationVersion;
         game.LaunchStage = Stage.Preparing;
         Send(request);
         game.LaunchStage = Stage.AircraftSpawned;
-        var view = WorldSnapshot.Parser.ParseFrom(provider.Tick());
+        var view = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         provider.Results.TryDequeue(out var spawnedBytes);
         var spawned = OrderResult.Parser.ParseFrom(spawnedBytes);
-        Check(view.Instances.Any(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId && unit.Subject.OwnUnitId == spawned.SpawnedEntityId), "uncertain_recovers_ordinary_unit");
+        Check(view.Instances.Any(unit => unit.UnitId.Equals(spawned.SpawnedUnitId)), "uncertain_recovers_ordinary_unit");
         provider.Invalidate();
         Check(game.LaunchResets == 1, "session_reset_calls_facade_cleanup");
         provider.Tick();
         Check(Send(request).Reason == "stale_session" && game.LaunchMutations == 2, "reset_blocks_previous_launch");
         var invalidHandle = request.Clone();
-        invalidHandle.SessionId = WorldSnapshot.Parser.ParseFrom(provider.Tick()).Session.SessionId;
+        invalidHandle.SessionId = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot.Session.SessionId;
         invalidHandle.RequestId = "old-handle";
         Check(Send(invalidHandle).Reason == "wrong_side_or_invalid_entity", "reset_blocks_previous_handle");
         var fresh = request.Clone();
-        var current = WorldSnapshot.Parser.ParseFrom(provider.Tick());
+        var current = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         fresh.SessionId = current.Session.SessionId;
-        fresh.Subject.OwnUnitId = current.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId;
+        fresh.UnitId = current.Instances[0].UnitId.Clone();
         fresh.BasedOnVersion = current.ObservationVersion;
         fresh.RequestId = "active";
         game.LaunchStage = Stage.ExecutionUnknown;
@@ -200,9 +204,9 @@ static class LaunchLifecycleTests
         Send(fresh);
         provider.Invalidate();
         Check(game.LaunchResets == 2, "reset_uncertain_launch_cleans_up");
-        current = WorldSnapshot.Parser.ParseFrom(provider.Tick());
+        current = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         fresh.SessionId = current.Session.SessionId;
-        fresh.Subject.OwnUnitId = current.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId;
+        fresh.UnitId = current.Instances[0].UnitId.Clone();
         fresh.BasedOnVersion = current.ObservationVersion;
         game.LaunchAcceptance = Stage.NativeTaskCreated;
         game.LaunchStage = Stage.Preparing;
@@ -217,14 +221,18 @@ static class LaunchLifecycleTests
         game.Own.LaunchSupported = true;
         game.Own.LaunchRestriction = "";
         var provider = new Provider(game, "own");
-        var snapshot = WorldSnapshot.Parser.ParseFrom(provider.Tick());
+        var snapshot = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         var request = new OrderRequest
         {
             SessionId = snapshot.Session.SessionId,
             RequestId = "publication-failure",
-            Subject = new Subject { OwnUnitId = snapshot.Instances.First(unit => unit.Subject.IdentityCase == Subject.IdentityOneofCase.OwnUnitId).Subject.OwnUnitId },
+            UnitId = snapshot.Instances[0].UnitId.Clone(),
             BasedOnVersion = snapshot.ObservationVersion,
-            FacilityLaunch = new FacilityLaunch { ClassKey = "class", Squadron = "squadron", Loadout = "loadout", Count = 1 }
+            AircraftLaunch = new AircraftLaunch
+            {
+                UnitTypeId = new UnitTypeId { Value = "class" }, Squadron = "squadron",
+                LoadoutId = new LoadoutId { Value = "loadout" }, Count = 1
+            }
         };
         void FillStatuses()
         {

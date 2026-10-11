@@ -6,6 +6,7 @@ public sealed class UnitSample
 {
     public string Key = "";
     public string Name = "";
+    public string TaskForceKey;
     public bool Own;
     public bool Supported;
     public bool Controllable;
@@ -23,7 +24,9 @@ public sealed class UnitSample
     public double LatitudeDeg;
     public double LongitudeDeg;
     public double SpeedMetersPerSecond;
-    public readonly List<StockSample> Stocks = new();
+    public double? HeadingRadians;
+    public readonly List<AircraftInventorySample> AircraftInventory = new();
+    public NavalCommand.Gateway.Wire.CollectionCoverage InventoryCoverage;
     public int PendingOperations;
     public bool HasFacility;
     public bool Truncated;

@@ -6,11 +6,17 @@ using NavalCommand.Gateway.Wire;
 
 sealed class FakeGameFacade : IGameFacade
 {
-    public bool Ready => true;
+    public bool IsReady = true;
+    public bool Ready => IsReady;
+    public string SourceSessionKey = "native-session";
+    public string SessionKey => SourceSessionKey;
     public double OperationalSeconds => 42;
 
     public int Mutations;
+    public Action BeforeResolve;
     public Action BeforeRouteMutation;
+    public Action BeforeWaypointMutation;
+    public Action BeforeLaunchMutation;
     public int LaunchMutations;
     public bool ResourcesAvailable = true;
     public Stage LaunchStage = Stage.Preparing;
@@ -18,6 +24,7 @@ sealed class FakeGameFacade : IGameFacade
     public UnitSample Own = new()
     {
         Key = "own",
+        TaskForceKey = "native-taskforce",
         Own = true,
         Supported = true,
         Controllable = true,
@@ -29,18 +36,24 @@ sealed class FakeGameFacade : IGameFacade
     public IReadOnlyList<UnitSample> CaptureUnits() => new[]
     {
         Own,
-        new UnitSample
-        {
-            Key = "hidden",
-            Own = false
-        },
+        new UnitSample { Key = "hidden", Own = false },
         LaunchStage == Stage.AircraftSpawned || LaunchStage == Stage.Airborne ? Spawned : new UnitSample()
     };
     public IReadOnlyList<TrackSample> Tracks = Array.Empty<TrackSample>();
     public IReadOnlyList<TrackSample> CaptureTracks() => Tracks;
-    public UnitSample Resolve(string key) => key == "own" ? Own : key == "spawn" ? Spawned : null;
+    public UnitSample Resolve(string key)
+    {
+        BeforeResolve?.Invoke();
+        return key == Own.Key ? Own : key == Spawned.Key ? Spawned : null;
+    }
     public bool AppendWaypoint(string key, double latitudeDegrees, double longitudeDegrees, string label)
     {
+        BeforeWaypointMutation?.Invoke();
+        var current = Resolve(key);
+        if (current == null || Provider.Eligibility(current).Availability != Availability.Executable)
+        {
+            return false;
+        }
         ++Mutations;
         return true;
     }
@@ -53,12 +66,17 @@ sealed class FakeGameFacade : IGameFacade
     public int LaunchPolls;
     public Stage LaunchAcceptance = Stage.NativeTaskCreated;
     public bool KeepUnknownLaunchTracking;
-    public LaunchProgress LaunchFacility(string key, FacilityLaunch request)
+    public LaunchProgress LaunchFacility(string key, AircraftLaunch request)
     {
-        string reason = !Own.LaunchSupported ? "unsupported_facility"
-            : request.ClassKey != "class" ? "unsupported_aircraft"
+        BeforeLaunchMutation?.Invoke();
+        var current = Resolve(key);
+        string reason = current == null || !current.Own ? "wrong_side_or_invalid_entity"
+            : !current.LaunchSupported ? "unsupported_facility"
+            : !current.Controllable ? "uncontrollable"
+            : current.LaunchRestriction != "" ? current.LaunchRestriction
+            : request.UnitTypeId.Value != "class" ? "unsupported_aircraft"
             : request.Squadron != "squadron" ? "invalid_squadron"
-            : request.Loadout != "loadout" ? "invalid_loadout"
+            : request.LoadoutId.Value != "loadout" ? "invalid_loadout"
             : !ResourcesAvailable ? "resources_unavailable" : "";
         if (reason != "")
         {
@@ -74,7 +92,7 @@ sealed class FakeGameFacade : IGameFacade
         {
             Stage = LaunchStage,
             Reason = "fake_progress",
-            SpawnedKey = LaunchStage == Stage.AircraftSpawned || LaunchStage == Stage.Airborne ? "spawn" : "",
+            SpawnedKey = LaunchStage == Stage.AircraftSpawned || LaunchStage == Stage.Airborne ? Spawned.Key : "",
             TrackingActive = LaunchStage != Stage.Airborne && (LaunchStage != Stage.ExecutionUnknown || KeepUnknownLaunchTracking)
         };
     }
@@ -83,8 +101,14 @@ sealed class FakeGameFacade : IGameFacade
     {
         BeforeRouteMutation?.Invoke();
         var result = new RouteMutation();
-        result.Before.AddRange(Own.Route.Select(point => point.Clone()));
-        var eligibility = Provider.RouteEligibility(Own, mode);
+        var current = Resolve(key);
+        if (current == null)
+        {
+            result.Reason = "wrong_side_or_invalid_entity";
+            return result;
+        }
+        result.Before.AddRange(current.Route.Select(point => point.Clone()));
+        var eligibility = Provider.RouteEligibility(current, mode);
         if (eligibility.Availability != Availability.Executable)
         {
             result.Reason = eligibility.Reason;
@@ -93,11 +117,11 @@ sealed class FakeGameFacade : IGameFacade
         ++Mutations;
         if (mode == RouteMode.ReplaceRoute)
         {
-            Own.Route.Clear();
+            current.Route.Clear();
         }
-        Own.Route.Add(new RoutePoint { LatitudeDeg = latitudeDeg, LongitudeDeg = longitudeDeg, Label = label });
-        Own.SelectedTask = true;
-        result.After.AddRange(Own.Route.Select(point => point.Clone()));
+        current.Route.Add(new RoutePoint { LatitudeDeg = latitudeDeg, LongitudeDeg = longitudeDeg, Label = label });
+        current.SelectedTask = true;
+        result.After.AddRange(current.Route.Select(point => point.Clone()));
         result.Mutated = true;
         result.Reason = "fake_route_sequence_verified";
         return result;

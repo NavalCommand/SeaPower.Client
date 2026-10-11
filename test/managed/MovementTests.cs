@@ -22,10 +22,11 @@ static class MovementTests
         var initial = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         OrderRequest Request(string id, RouteMode mode) => new()
         {
-            SessionId = initial.Session.SessionId,
-            UnitId = initial.Instances[0].UnitId.Clone(),
+            SessionId = initial.SessionId,
+            Observer = initial.Observer.Clone(),
+            Observation = initial.Units[0].Identity.Clone(),
             RequestId = id,
-            BasedOnVersion = initial.ObservationVersion,
+            BasedOnVersion = initial.Version,
             Waypoint = new Waypoint { LatitudeDeg = 62, LongitudeDeg = -10.37, RouteMode = mode }
         };
         OrderResult Send(OrderRequest request)
@@ -79,7 +80,7 @@ static class MovementTests
         }
         Check(Send(Request("capacity", RouteMode.AppendWaypoint)).Reason == "route_capacity" && game.Mutations == 4, "route_bound");
         var future = Request("future-observation", RouteMode.ReplaceRoute);
-        future.BasedOnVersion = initial.ObservationVersion + 100;
+        future.BasedOnVersion = initial.Version + 100;
         Check(Send(future).Reason == "stale_observation" && game.Mutations == 4, "future_observation_rejected");
         var expired = Request("expired-observation", RouteMode.ReplaceRoute);
         for (int tick = 0; tick < 21; tick++)
@@ -97,10 +98,11 @@ static class MovementTests
         var view = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         var request = new OrderRequest
         {
-            SessionId = view.Session.SessionId,
+            SessionId = view.SessionId,
             RequestId = "head",
-            UnitId = view.Instances[0].UnitId.Clone(),
-            BasedOnVersion = view.ObservationVersion,
+            Observer = view.Observer.Clone(),
+            Observation = view.Units[0].Identity.Clone(),
+            BasedOnVersion = view.Version,
             Waypoint = new Waypoint { LatitudeDeg = 62, LongitudeDeg = -10, RouteMode = RouteMode.ReplaceRoute }
         };
         provider.Enqueue(request.ToByteArray());

@@ -24,6 +24,7 @@ sealed class FakeGameFacade : IGameFacade
     public UnitSample Own = new()
     {
         Key = "own",
+        Name = "own-platform-name",
         TaskForceKey = "native-taskforce",
         Own = true,
         Supported = true,
@@ -66,7 +67,7 @@ sealed class FakeGameFacade : IGameFacade
     public int LaunchPolls;
     public Stage LaunchAcceptance = Stage.NativeTaskCreated;
     public bool KeepUnknownLaunchTracking;
-    public LaunchProgress LaunchFacility(string key, AircraftLaunch request)
+    public LaunchProgress LaunchFacility(string key, LaunchAircraft request)
     {
         BeforeLaunchMutation?.Invoke();
         var current = Resolve(key);
@@ -74,9 +75,9 @@ sealed class FakeGameFacade : IGameFacade
             : !current.LaunchSupported ? "unsupported_facility"
             : !current.Controllable ? "uncontrollable"
             : current.LaunchRestriction != "" ? current.LaunchRestriction
-            : request.UnitTypeId.Value != "class" ? "unsupported_aircraft"
-            : request.Squadron != "squadron" ? "invalid_squadron"
-            : request.LoadoutId.Value != "loadout" ? "invalid_loadout"
+            : request.Selection == null || request.Selection.Type == null || request.Selection.Type.Value != "class" ? "unsupported_aircraft"
+            : request.Selection.Squadron != "squadron" ? "invalid_squadron"
+            : request.Selection.Loadout == null || request.Selection.Loadout.Value != "loadout" ? "invalid_loadout"
             : !ResourcesAvailable ? "resources_unavailable" : "";
         if (reason != "")
         {

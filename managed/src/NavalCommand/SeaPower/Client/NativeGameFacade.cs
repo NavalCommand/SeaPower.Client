@@ -25,6 +25,7 @@ public sealed partial class NativeGameFacade : IGameFacade
     Taskforce sourceTaskforce;
     GameMain sourceGame;
     string sourceSessionKey = "";
+    string sourceTaskforceKey = "";
 
     public string SessionKey
     {
@@ -37,6 +38,7 @@ public sealed partial class NativeGameFacade : IGameFacade
                 sourceGame = currentGame;
                 sourceTaskforce = Globals._playerTaskforce;
                 sourceSessionKey = Guid.NewGuid().ToString("N");
+                sourceTaskforceKey = sourceTaskforce == null ? "" : Guid.NewGuid().ToString("N");
             }
             return sourceSessionKey;
         }
@@ -79,6 +81,7 @@ public sealed partial class NativeGameFacade : IGameFacade
 
     UnitSample SampleUnit(ObjectBase nativeUnit, string unitKey)
     {
+        _ = SessionKey;
         bool isOwnUnit = nativeUnit != null && !nativeUnit.IsDestroyed && nativeUnit.UnitTaskforce.Value == Globals._playerTaskforce
             && Globals._playerTaskforce._taskforceUnits.Contains(nativeUnit);
         if (!isOwnUnit)
@@ -92,7 +95,6 @@ public sealed partial class NativeGameFacade : IGameFacade
         {
             Key = unitKey,
             Name = nativeUnit.name,
-            TaskForceKey = SessionKey,
             Own = true,
             Supported = nativeUnit is Vessel || nativeUnit is Aircraft || nativeUnit is Helicopter,
             Controllable = nativeUnit.HasControl && nativeUnit.IsControllable && nativeUnit.AcceptsOrdersFromPlayer && nativeUnit._userRoot != null,

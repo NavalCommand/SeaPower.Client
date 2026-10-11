@@ -25,6 +25,7 @@ static class LaunchTests
         game.Own.OnboardCount = 0;
         var inventory = new AircraftInventorySample { ClassKey = "class", Squadron = "squadron", Count = 0 };
         inventory.Loadouts.Add("loadout");
+        inventory.Loadouts.Add("alternate");
         inventory.LaunchOptions.Add(new AircraftInventorySample.LaunchOptionSample
         {
             Loadout = "loadout", Availability = Availability.Blocked, Reason = "inventory_unavailable"
@@ -33,44 +34,68 @@ static class LaunchTests
         var provider = new Provider(game, "own");
         var observed = ProviderObservation.Parser.ParseFrom(provider.Tick());
         var initial = observed.Snapshot;
-        var airOperations = initial.Instances.Single().AirOperations;
+        var airOperations = initial.Units.Single().AirOperations;
         var inventoryEntry = airOperations.Inventory.Items.Single();
-        Check(initial.Instances.Count == 1 && airOperations.Inventory.Coverage == CollectionCoverage.CoverageComplete
-            && inventoryEntry.UnitTypeId.Value == "class" && inventoryEntry.Loadouts.Single().Value == "loadout",
-            "air_operations_attached_to_regular_unit");
+        Check(initial.Units.Count == 1 && airOperations.Inventory.Coverage == CollectionCoverage.CoverageComplete
+            && inventoryEntry.Type.Known.Value == "class" && inventoryEntry.Squadron.Known == "squadron"
+            && inventoryEntry.Loadouts.Coverage == CollectionCoverage.CoverageComplete
+            && inventoryEntry.Loadouts.Items.Count == 2
+            && inventoryEntry.Loadouts.Items.Any(loadout => loadout.Value == "loadout"),
+            "air_operations_attached_to_platform_observation");
         Check(inventoryEntry.UnreservedCount.StateCase == UInt32Knowledge.StateOneofCase.Known
             && inventoryEntry.UnreservedCount.Known == 0 && airOperations.OnboardCount.StateCase == UInt32Knowledge.StateOneofCase.Known
             && airOperations.OnboardCount.Known == 0 && airOperations.ReservedCount == null,
             "air_inventory_known_zero_and_unknown_lifecycle_counts");
         var launchAvailability = observed.OrderAvailability.Single().Eligibility.Items.Single(row => row.Kind == OrderKind.LaunchAircraft);
         Check(launchAvailability.Availability == Availability.Blocked && launchAvailability.Reason == "inventory_unavailable"
-            && launchAvailability.LaunchOption.UnitTypeId.Equals(inventoryEntry.UnitTypeId)
-            && launchAvailability.LaunchOption.LoadoutId.Equals(inventoryEntry.Loadouts.Single())
-            && observed.OrderAvailability[0].UnitId.Equals(initial.Instances[0].UnitId), "launch_selectors_only_in_orders_overlay");
-        Check(AircraftInventoryEntry.Descriptor.FindFieldByName("launch_options") == null
-            && UnitInstance.Descriptor.FindFieldByName("order_eligibility") == null
-            && WorldSnapshot.Descriptor.FindFieldByName("facilities") == null, "no_duplicate_public_facility_or_eligibility");
+            && launchAvailability.LaunchOption.Selection.Type.Equals(inventoryEntry.Type.Known)
+            && launchAvailability.LaunchOption.Selection.Squadron == inventoryEntry.Squadron.Known
+            && inventoryEntry.Loadouts.Items.Any(loadout => loadout.Equals(launchAvailability.LaunchOption.Selection.Loadout))
+            && observed.OrderAvailability[0].Observation.Equals(initial.Units[0].Identity), "launch_selectors_only_in_orders_overlay");
+        Check(AircraftInventoryEntry.Descriptor.FindFieldByName("selection") == null
+            && AircraftInventoryEntry.Descriptor.FindFieldByName("loadouts") != null
+            && LaunchAircraft.Descriptor.FindFieldByName("unit_type_id") == null
+            && UnitObservation.Descriptor.FindFieldByName("order_eligibility") == null
+            && ObserverSnapshot.Descriptor.FindFieldByName("facilities") == null
+            && OrderResult.Descriptor.FindFieldByName("spawned_unit_id") == null,
+            "no_truth_identity_or_duplicate_facility_eligibility");
         inventory.Count = null;
         game.Own.InventoryCoverage = CollectionCoverage.CoveragePartial;
         game.Own.Truncated = true;
         observed = ProviderObservation.Parser.ParseFrom(provider.Tick());
-        Check(observed.Snapshot.Instances[0].AirOperations.Inventory.Coverage == CollectionCoverage.CoveragePartial
-            && observed.Snapshot.Instances[0].AirOperations.Inventory.Items[0].UnreservedCount == null
+        Check(observed.Snapshot.Units[0].AirOperations.Inventory.Coverage == CollectionCoverage.CoveragePartial
+            && observed.Snapshot.Units[0].AirOperations.Inventory.Items[0].UnreservedCount == null
+            && observed.Snapshot.Units[0].AirOperations.Inventory.Items[0].Loadouts.Coverage == CollectionCoverage.CoveragePartial
             && observed.OrderAvailability[0].Eligibility.Coverage == CollectionCoverage.CoveragePartial
             && observed.Snapshot.Truncated, "partial_inventory_and_unknown_count_preserved");
         game.Own.AircraftInventory.Clear();
         game.Own.InventoryCoverage = CollectionCoverage.CoverageUnknown;
         observed = ProviderObservation.Parser.ParseFrom(provider.Tick());
-        Check(observed.Snapshot.Instances[0].AirOperations.Inventory.Coverage == CollectionCoverage.CoverageUnknown
-            && observed.Snapshot.Instances[0].AirOperations.Inventory.Items.Count == 0
+        Check(observed.Snapshot.Units[0].AirOperations.Inventory.Coverage == CollectionCoverage.CoverageUnknown
+            && observed.Snapshot.Units[0].AirOperations.Inventory.Items.Count == 0
             && observed.OrderAvailability[0].Eligibility.Items.Single(row => row.Kind == OrderKind.LaunchAircraft).Availability == Availability.Unknown,
             "unknown_inventory_never_claims_empty_or_executable");
         game.Own.InventoryCoverage = CollectionCoverage.CoverageComplete;
         observed = ProviderObservation.Parser.ParseFrom(provider.Tick());
-        Check(observed.Snapshot.Instances[0].AirOperations.Inventory.Coverage == CollectionCoverage.CoverageComplete
-            && observed.Snapshot.Instances[0].AirOperations.Inventory.Items.Count == 0
+        Check(observed.Snapshot.Units[0].AirOperations.Inventory.Coverage == CollectionCoverage.CoverageComplete
+            && observed.Snapshot.Units[0].AirOperations.Inventory.Items.Count == 0
             && observed.OrderAvailability[0].Eligibility.Items.Single(row => row.Kind == OrderKind.LaunchAircraft).Availability == Availability.Blocked,
             "complete_empty_air_inventory");
+        game.Own.Truncated = false;
+        var noLoadout = new AircraftInventorySample
+        {
+            ClassKey = "unselected-class",
+            Squadron = "unselected-squadron",
+            Count = 1
+        };
+        game.Own.AircraftInventory.Add(noLoadout);
+        observed = ProviderObservation.Parser.ParseFrom(provider.Tick());
+        var noLoadoutEntry = observed.Snapshot.Units[0].AirOperations.Inventory.Items.Single();
+        Check(observed.Snapshot.Units[0].AirOperations.Inventory.Coverage == CollectionCoverage.CoverageComplete
+            && noLoadoutEntry.Type.Known.Value == "unselected-class" && noLoadoutEntry.Squadron.Known == "unselected-squadron"
+            && noLoadoutEntry.UnreservedCount.Known == 1 && noLoadoutEntry.Loadouts.Coverage == CollectionCoverage.CoverageComplete
+            && noLoadoutEntry.Loadouts.Items.Count == 0, "grouped_native_stock_and_known_empty_loadouts");
+        game.Own.AircraftInventory.Clear();
         inventory.Count = 1;
         inventory.LaunchOptions[0].Availability = Availability.Executable;
         inventory.LaunchOptions[0].Reason = "";
@@ -79,15 +104,19 @@ static class LaunchTests
         initial = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         var request = new OrderRequest
         {
-            SessionId = initial.Session.SessionId,
+            SessionId = initial.SessionId,
             RequestId = "launch",
-            UnitId = initial.Instances[0].UnitId.Clone(),
-            BasedOnVersion = initial.ObservationVersion,
-            AircraftLaunch = new AircraftLaunch
+            Observer = initial.Observer.Clone(),
+            Observation = initial.Units[0].Identity.Clone(),
+            BasedOnVersion = initial.Version,
+            LaunchAircraft = new LaunchAircraft
             {
-                UnitTypeId = new UnitTypeId { Value = "class" },
-                Squadron = "squadron",
-                LoadoutId = new LoadoutId { Value = "loadout" },
+                Selection = new AircraftSelection
+                {
+                    Type = new UnitTypeId { Value = "class" },
+                    Squadron = "squadron",
+                    Loadout = new LoadoutId { Value = "loadout" }
+                },
                 Count = 1
             }
         };
@@ -104,7 +133,7 @@ static class LaunchTests
         }
         var invalid = request.Clone();
         invalid.RequestId = "count";
-        invalid.AircraftLaunch.Count = 2;
+        invalid.LaunchAircraft.Count = 2;
         Check(Send(invalid).Reason == "invalid_arguments", "launch_bounded_count");
         invalid = request.Clone();
         invalid.RequestId = "stale";
@@ -130,10 +159,12 @@ static class LaunchTests
         var spawnedObservation = ProviderObservation.Parser.ParseFrom(provider.Tick());
         provider.Results.TryDequeue(out var spawnedBytes);
         var spawned = OrderResult.Parser.ParseFrom(spawnedBytes);
-        var spawnedUnit = spawnedObservation.Snapshot.Instances.Single(unit => unit.UnitId.Equals(spawned.SpawnedUnitId));
-        Check(spawned.Stage == Stage.AircraftSpawned && spawnedUnit.Aircraft.Airborne.StateCase == BoolKnowledge.StateOneofCase.Known
-            && !spawnedUnit.Aircraft.Airborne.Known, "launch_spawn_regular_grounded_unit");
-        Check(spawnedObservation.OrderAvailability.Single(row => row.UnitId.Equals(spawned.SpawnedUnitId))
+        var spawnedUnit = spawnedObservation.Snapshot.Units.Single(unit => unit.Identity.Equals(spawned.SpawnedObservationId));
+        Check(spawned.Stage == Stage.AircraftSpawned && spawned.Observer.Equals(spawnedObservation.Snapshot.Observer)
+            && spawned.SpawnedObservationId != null
+            && spawnedUnit.Aircraft.Airborne.StateCase == BoolKnowledge.StateOneofCase.Known
+            && !spawnedUnit.Aircraft.Airborne.Known, "launch_spawn_observation_handle_grounded");
+        Check(spawnedObservation.OrderAvailability.Single(row => row.Observation.Equals(spawned.SpawnedObservationId))
             .Eligibility.Items.Single(row => row.Kind == OrderKind.IdleWaypoint).Availability == Availability.Unknown,
             "grounded_spawn_orders_protected");
         game.LaunchStage = Stage.Airborne;

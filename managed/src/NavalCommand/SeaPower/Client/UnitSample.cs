@@ -4,8 +4,10 @@ namespace NavalCommand.SeaPower.Client;
 
 public sealed class UnitSample
 {
+    // Adapter-local source key; never serialized or used as an authorization token.
     public string Key = "";
-    public string Name = "";
+    // Optional source-backed display name; null means unavailable.
+    public string Name;
     public string TaskForceKey;
     public bool Own;
     public bool Supported;

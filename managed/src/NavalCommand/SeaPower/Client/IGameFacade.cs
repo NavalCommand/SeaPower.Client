@@ -25,7 +25,7 @@ public interface IGameFacade
     UnitSample Resolve(string key);
     bool AppendWaypoint(string key, double latitudeDeg, double longitudeDeg, string label);
     RouteMutation UpdateRoute(string key, double latitudeDeg, double longitudeDeg, string label, NavalCommand.Gateway.Wire.RouteMode mode);
-    LaunchProgress LaunchFacility(string key, NavalCommand.Gateway.Wire.AircraftLaunch request);
+    LaunchProgress LaunchFacility(string key, NavalCommand.Gateway.Wire.LaunchAircraft request);
     LaunchProgress PollLaunch(string token);
     void Reset();
 }

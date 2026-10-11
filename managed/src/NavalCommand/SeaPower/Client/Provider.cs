@@ -15,7 +15,7 @@ public sealed class Provider
     private const int MaximumQueuedCommands = 64;
     private const int MaximumRetainedResults = 128;
     private const int MaximumSnapshotItems = 128;
-    private const int MaximumStocksPerFacility = 12;
+    private const int MaximumAircraftInventoryEntries = 12;
     private const int MaximumCommandsPerTick = 8;
     private const int MaximumSnapshotBytes = 1_048_576;
     private const int MaximumRequestIdCharacters = 128;
@@ -27,9 +27,9 @@ public sealed class Provider
     readonly IGameFacade gameFacade;
     readonly int ownerThreadId;
     readonly string observerId;
-    readonly Dictionary<string, string> ownHandles = new();
-    readonly Dictionary<string, string> contactHandles = new();
-    readonly Dictionary<string, string> controlledKeysByHandle = new();
+    readonly Dictionary<string, string> ownObservationIds = new();
+    readonly Dictionary<string, string> contactObservationIds = new();
+    readonly Dictionary<string, string> controlledSourceKeysByObservationId = new();
     readonly Dictionary<string, string> taskForceHandles = new();
     readonly Dictionary<string, OrderResult> requestLedger = new();
     readonly Dictionary<string, (string Key, double LatitudeDegrees, double LongitudeDegrees, bool AwaitingActivation)> pendingMovement = new();
@@ -94,9 +94,9 @@ public sealed class Provider
         sessionId = "";
         observationVersion = 0;
         sourceSessionKey = "";
-        ownHandles.Clear();
-        contactHandles.Clear();
-        controlledKeysByHandle.Clear();
+        ownObservationIds.Clear();
+        contactObservationIds.Clear();
+        controlledSourceKeysByObservationId.Clear();
         taskForceHandles.Clear();
         requestLedger.Clear();
         pendingMovement.Clear();
@@ -115,13 +115,12 @@ public sealed class Provider
         {
         }
 
-        var snapshot = new WorldSnapshot
+        var snapshot = new ObserverSnapshot
         {
-            Session = new Session
-            {
-                SchemaVersion = 3,
-                Ready = false
-            }
+            Observer = new ObserverId { Value = observerId },
+            Ready = false,
+            SchemaVersion = 4,
+            Memberships = new ObservedRelationships { Coverage = CollectionCoverage.CoverageUnknown }
         };
         snapshotQueue.Enqueue(new ProviderObservation { Snapshot = snapshot }.ToByteArray());
     }
@@ -152,12 +151,12 @@ public sealed class Provider
 
         var units = gameFacade.CaptureUnits().Where(unit => unit.Own).Take(MaximumSnapshotItems + 1).ToArray();
         var contacts = gameFacade.CaptureTracks().Take(MaximumSnapshotItems + 1).ToArray();
-        UpdateHandles(ownHandles, units.Take(MaximumSnapshotItems).Select(unit => unit.Key));
-        UpdateHandles(contactHandles, contacts.Take(MaximumSnapshotItems).Select(contact => contact.Key));
-        controlledKeysByHandle.Clear();
-        foreach (var handle in ownHandles)
+        UpdateHandles(ownObservationIds, units.Take(MaximumSnapshotItems).Select(unit => unit.Key));
+        UpdateHandles(contactObservationIds, contacts.Take(MaximumSnapshotItems).Select(contact => contact.Key));
+        controlledSourceKeysByObservationId.Clear();
+        foreach (var handle in ownObservationIds)
         {
-            controlledKeysByHandle.Add(handle.Value, handle.Key);
+            controlledSourceKeysByObservationId.Add(handle.Value, handle.Key);
         }
 
         // Process bounded commands before publishing a new version.
@@ -177,28 +176,24 @@ public sealed class Provider
             Dispatch(orderResult);
         }
 
-        var snapshot = new WorldSnapshot
+        var snapshot = new ObserverSnapshot
         {
-            Session = new Session
-            {
-                SchemaVersion = 3,
-                SessionId = sessionId,
-                ObserverId = observerId,
-                Ready = true
-            },
-            ObservationVersion = ++observationVersion,
-            OperationalSeconds = gameFacade.OperationalSeconds,
+            SessionId = sessionId,
+            Observer = new ObserverId { Value = observerId },
+            Ready = true,
+            SchemaVersion = 4,
+            Version = ++observationVersion,
+            CapturedAtSeconds = gameFacade.OperationalSeconds,
             Truncated = units.Length > MaximumSnapshotItems || contacts.Length > MaximumSnapshotItems || units.Any(unit => unit.Truncated),
-            Memberships = new ObservedMemberships { Coverage = CollectionCoverage.CoverageUnknown },
+            Memberships = new ObservedRelationships { Coverage = CollectionCoverage.CoverageUnknown },
         };
         var observation = new ProviderObservation { Snapshot = snapshot };
         foreach (var unit in units.Take(MaximumSnapshotItems))
         {
-            var wireUnit = new UnitInstance
+            var wireUnit = new UnitObservation
             {
-                UnitId = new UnitId { Value = ownHandles[unit.Key] },
-                Display = new IdentityState { Name = new StringKnowledge { Known = unit.Name } },
-                Kinematics = new KinematicsState
+                Identity = new ObservationId { Value = ownObservationIds[unit.Key] },
+                Kinematics = new KinematicsObservation
                 {
                     Position = new PositionKnowledge
                     {
@@ -209,11 +204,14 @@ public sealed class Provider
                     },
                     SpeedMps = new DoubleKnowledge { Known = unit.SpeedMetersPerSecond }
                 },
-                Observation = new ObservationMetadata { MeasuredAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds } },
+                Evidence = new ObservationMetadata { MeasuredAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds } },
                 // Equipment capture is not implemented. Unknown inventory never means unarmed.
-                Equipment = new ObservedEquipment { Coverage = CollectionCoverage.CoverageUnknown },
-                Navigation = new NavigationState()
+                Equipment = new ObservedEquipment { Coverage = CollectionCoverage.CoverageUnknown }
             };
+            if (unit.Name != null)
+            {
+                wireUnit.Name = new StringKnowledge { Known = unit.Name };
+            }
             if (unit.HeadingRadians.HasValue)
             {
                 wireUnit.Kinematics.HeadingRad = new DoubleKnowledge { Known = unit.HeadingRadians.Value };
@@ -221,8 +219,9 @@ public sealed class Provider
             var discovery = new OrderDiscovery
             {
                 SessionId = sessionId,
-                UnitId = wireUnit.UnitId.Clone(),
-                BasedOnVersion = snapshot.ObservationVersion,
+                Observer = new ObserverId { Value = observerId },
+                Observation = wireUnit.Identity.Clone(),
+                BasedOnVersion = snapshot.Version,
                 Eligibility = new OrderEligibilityState
                 {
                     Coverage = unit.Truncated ? CollectionCoverage.CoveragePartial : CollectionCoverage.CoverageComplete
@@ -235,11 +234,11 @@ public sealed class Provider
             {
                 var route = new Route();
                 route.Points.Add(unit.Route.Select(point => point.Clone()));
-                wireUnit.Navigation.PlannedRoute = new RouteKnowledge { Known = route };
+                wireUnit.Navigation = new NavigationObservation { PlannedRoute = new RouteKnowledge { Known = route } };
             }
             if (unit.Airborne.HasValue)
             {
-                wireUnit.Aircraft = new AircraftState { Airborne = new BoolKnowledge { Known = unit.Airborne.Value } };
+                wireUnit.Aircraft = new AircraftObservation { Airborne = new BoolKnowledge { Known = unit.Airborne.Value } };
             }
             if (unit.LaunchSupported)
             {
@@ -248,9 +247,10 @@ public sealed class Provider
             observation.OrderAvailability.Add(discovery);
             if (unit.HasFacility)
             {
-                wireUnit.AirOperations = new AirOperations
+                var inventoryCoverage = unit.InventoryCoverage;
+                wireUnit.AirOperations = new AirOperationsObservation
                 {
-                    Inventory = new AircraftInventory { Coverage = unit.InventoryCoverage },
+                    Inventory = new AircraftInventory { Coverage = inventoryCoverage },
                     PendingOperations = new UInt32Knowledge { Known = (uint)Math.Max(0, unit.PendingOperations) },
                     MeasuredAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds }
                 };
@@ -266,19 +266,27 @@ public sealed class Provider
                 {
                     wireUnit.AirOperations.CooldownCount = new UInt32Knowledge { Known = unit.CooldownCount.Value };
                 }
-                foreach (var inventory in unit.AircraftInventory.Take(MaximumStocksPerFacility))
+                if (inventoryCoverage != CollectionCoverage.CoverageUnknown)
                 {
-                    var entry = new AircraftInventoryEntry
+                    foreach (var inventory in unit.AircraftInventory.Take(MaximumAircraftInventoryEntries))
                     {
-                        UnitTypeId = new UnitTypeId { Value = inventory.ClassKey },
-                        Squadron = inventory.Squadron
-                    };
-                    if (inventory.Count.HasValue)
-                    {
-                        entry.UnreservedCount = new UInt32Knowledge { Known = (uint)Math.Max(0, inventory.Count.Value) };
+                        var entry = new AircraftInventoryEntry
+                        {
+                            Type = new UnitTypeIdKnowledge { Known = new UnitTypeId { Value = inventory.ClassKey } },
+                            Squadron = new StringKnowledge { Known = inventory.Squadron },
+                            Loadouts = new ObservedLoadouts
+                            {
+                                Coverage = unit.Truncated ? CollectionCoverage.CoveragePartial : CollectionCoverage.CoverageComplete
+                            }
+                        };
+                        if (inventory.Count.HasValue)
+                        {
+                            entry.UnreservedCount = new UInt32Knowledge { Known = (uint)Math.Max(0, inventory.Count.Value) };
+                        }
+                        entry.Loadouts.Items.Add(inventory.Loadouts.Take(MaximumAircraftInventoryEntries)
+                            .Select(loadout => new LoadoutId { Value = loadout }));
+                        wireUnit.AirOperations.Inventory.Items.Add(entry);
                     }
-                    entry.Loadouts.Add(inventory.Loadouts.Select(loadout => new LoadoutId { Value = loadout }));
-                    wireUnit.AirOperations.Inventory.Items.Add(entry);
                 }
             }
             if (!string.IsNullOrEmpty(unit.TaskForceKey))
@@ -289,37 +297,38 @@ public sealed class Provider
                     taskForceHandles.Add(unit.TaskForceKey, taskForceHandle);
                 }
                 snapshot.Memberships.Coverage = CollectionCoverage.CoveragePartial;
-                snapshot.Memberships.Items.Add(new UnitMembership
+                snapshot.Memberships.Items.Add(new ObserverUnitRelationship
                 {
-                    UnitId = wireUnit.UnitId.Clone(),
-                    TaskForce = new StringKnowledge { Known = taskForceHandle }
+                    Observation = wireUnit.Identity.Clone(),
+                    TaskForce = new TaskForceIdKnowledge { Known = new TaskForceId { Value = taskForceHandle } }
                 });
             }
-            snapshot.Instances.Add(wireUnit);
+            snapshot.Units.Add(wireUnit);
         }
 
-        foreach (var contact in contacts.Take(MaximumSnapshotItems).Where(contact => contact.PositionAvailable))
+        foreach (var contact in contacts.Take(MaximumSnapshotItems))
         {
-            snapshot.Instances.Add(new UnitInstance
+            var wireContact = new UnitObservation
             {
-                UnitId = new UnitId { Value = contactHandles[contact.Key] },
-                Kinematics = new KinematicsState
+                Identity = new ObservationId { Value = contactObservationIds[contact.Key] },
+                Kinematics = new KinematicsObservation(),
+                // Native plotting cache has no verified sensor identity or measurement epoch.
+                Equipment = new ObservedEquipment { Coverage = CollectionCoverage.CoverageUnknown }
+            };
+            if (contact.PositionAvailable)
+            {
+                wireContact.Kinematics.Position = new PositionKnowledge
                 {
-                    Position = new PositionKnowledge
+                    Estimated = new PositionKnowledge.Types.Estimate
                     {
-                        Estimated = new PositionKnowledge.Types.Estimate
+                        Value = new PositionObservation
                         {
-                            Value = new PositionObservation
-                            {
-                                Coordinates = new GeoPoint { LatitudeDeg = contact.LatitudeDeg, LongitudeDeg = contact.LongitudeDeg }
-                            }
+                            Coordinates = new GeoPoint { LatitudeDeg = contact.LatitudeDeg, LongitudeDeg = contact.LongitudeDeg }
                         }
                     }
-                },
-                // Cached position has no verified sensor identity or measurement epoch.
-                Observation = new ObservationMetadata(),
-                Equipment = new ObservedEquipment { Coverage = CollectionCoverage.CoverageUnknown }
-            });
+                };
+            }
+            snapshot.Units.Add(wireContact);
         }
 
         foreach (var pendingRequest in pendingMovement.ToArray())
@@ -365,9 +374,9 @@ public sealed class Provider
         {
             var progress = gameFacade.PollLaunch(pending.Value);
             var result = requestLedger[pending.Key].Clone();
-            if (progress.SpawnedKey != "" && ownHandles.TryGetValue(progress.SpawnedKey, out var spawnedId))
+            if (progress.SpawnedKey != "" && ownObservationIds.TryGetValue(progress.SpawnedKey, out var spawnedObservationId))
             {
-                result.SpawnedUnitId = new UnitId { Value = spawnedId };
+                result.SpawnedObservationId = new ObservationId { Value = spawnedObservationId };
             }
             // Tracking ownership must survive publication backpressure. Terminal
             // native records are already released and must never be polled again.
@@ -376,7 +385,7 @@ public sealed class Provider
                 pendingLaunches.Remove(pending.Key);
             }
             if (result.Stage != progress.Stage || result.Reason != progress.Reason
-                || !Equals(result.SpawnedUnitId, requestLedger[pending.Key].SpawnedUnitId))
+                || !Equals(result.SpawnedObservationId, requestLedger[pending.Key].SpawnedObservationId))
             {
                 result.Stage = progress.Stage;
                 result.Reason = progress.Reason;
@@ -417,18 +426,21 @@ public sealed class Provider
     static void AddLaunchAvailability(OrderEligibilityState availability, UnitSample unit)
     {
         int initialCount = availability.Items.Count;
-        foreach (var inventory in unit.AircraftInventory.Take(MaximumStocksPerFacility))
+        foreach (var inventory in unit.AircraftInventory.Take(MaximumAircraftInventoryEntries))
         {
             foreach (var option in inventory.LaunchOptions)
             {
                 availability.Items.Add(new OrderEligibility
                 {
                     Kind = OrderKind.LaunchAircraft,
-                    LaunchOption = new AircraftLaunch
+                    LaunchOption = new LaunchAircraft
                     {
-                        UnitTypeId = new UnitTypeId { Value = inventory.ClassKey },
-                        Squadron = inventory.Squadron,
-                        LoadoutId = new LoadoutId { Value = option.Loadout },
+                        Selection = new AircraftSelection
+                        {
+                            Type = new UnitTypeId { Value = inventory.ClassKey },
+                            Squadron = inventory.Squadron,
+                            Loadout = new LoadoutId { Value = option.Loadout }
+                        },
                         Count = 1
                     },
                     Availability = unit.LaunchRestriction == "" ? option.Availability : Availability.Blocked,
@@ -529,6 +541,7 @@ public sealed class Provider
         {
             SessionId = request.SessionId,
             RequestId = request.RequestId,
+            Observer = new ObserverId { Value = observerId },
             Stage = Stage.Rejected,
             SampledAtSeconds = gameFacade.OperationalSeconds
         };
@@ -538,6 +551,16 @@ public sealed class Provider
             PublishResult(result);
         }
 
+        if (request.Observer == null || request.Observer.Value != observerId)
+        {
+            result.Reason = "wrong_observer";
+            if (Results.Count < MaximumRetainedResults)
+            {
+                Results.Enqueue(result.ToByteArray());
+            }
+
+            return;
+        }
         if (request.SessionId != sessionId)
         {
             result.Reason = "stale_session";
@@ -576,7 +599,7 @@ public sealed class Provider
             return;
         }
 
-        if (request.UnitId == null || !controlledKeysByHandle.TryGetValue(request.UnitId.Value, out var unitKey))
+        if (request.Observation == null || !controlledSourceKeysByObservationId.TryGetValue(request.Observation.Value, out var unitKey))
         {
             Reject("wrong_side_or_invalid_entity");
             return;
@@ -589,7 +612,7 @@ public sealed class Provider
         }
 
         var waypoint = request.Waypoint;
-        if (request.AircraftLaunch != null)
+        if (request.LaunchAircraft != null)
         {
             if (request.BasedOnVersion == 0 || request.BasedOnVersion > observationVersion
                 || observationVersion - request.BasedOnVersion > MaximumObservationAgeVersions)
@@ -597,10 +620,12 @@ public sealed class Provider
                 Reject("stale_observation");
                 return;
             }
-            var launch = request.AircraftLaunch;
-            if (launch.Count != 1 || launch.UnitTypeId == null || string.IsNullOrWhiteSpace(launch.UnitTypeId.Value)
-                || string.IsNullOrWhiteSpace(launch.Squadron) || launch.LoadoutId == null || string.IsNullOrWhiteSpace(launch.LoadoutId.Value)
-                || launch.UnitTypeId.Value.Length > 128 || launch.Squadron.Length > 128 || launch.LoadoutId.Value.Length > 128)
+            var launch = request.LaunchAircraft;
+            if (launch.Count != 1 || launch.Selection == null || launch.Selection.Type == null
+                || string.IsNullOrWhiteSpace(launch.Selection.Type.Value) || string.IsNullOrWhiteSpace(launch.Selection.Squadron)
+                || launch.Selection.Loadout == null || string.IsNullOrWhiteSpace(launch.Selection.Loadout.Value)
+                || launch.Selection.Type.Value.Length > 128 || launch.Selection.Squadron.Length > 128
+                || launch.Selection.Loadout.Value.Length > 128)
             {
                 Reject("invalid_arguments");
                 return;

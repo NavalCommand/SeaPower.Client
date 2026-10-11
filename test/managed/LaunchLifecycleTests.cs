@@ -143,14 +143,19 @@ static class LaunchLifecycleTests
         var initial = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         var request = new OrderRequest
         {
-            SessionId = initial.Session.SessionId,
+            SessionId = initial.SessionId,
             RequestId = "uncertain",
-            UnitId = initial.Instances[0].UnitId.Clone(),
-            BasedOnVersion = initial.ObservationVersion,
-            AircraftLaunch = new AircraftLaunch
+            Observer = initial.Observer.Clone(),
+            Observation = initial.Units[0].Identity.Clone(),
+            BasedOnVersion = initial.Version,
+            LaunchAircraft = new LaunchAircraft
             {
-                UnitTypeId = new UnitTypeId { Value = "class" }, Squadron = "squadron",
-                LoadoutId = new LoadoutId { Value = "loadout" }, Count = 1
+                Selection = new AircraftSelection
+                {
+                    Type = new UnitTypeId { Value = "class" }, Squadron = "squadron",
+                    Loadout = new LoadoutId { Value = "loadout" }
+                },
+                Count = 1
             }
         };
         OrderResult Send(OrderRequest command)
@@ -177,27 +182,28 @@ static class LaunchLifecycleTests
         Check(game.LaunchPolls == terminalPollCount, "provider_stops_polling_terminal_unknown");
         Check(Send(request).Stage == Stage.ExecutionUnknown && game.LaunchMutations == 1, "terminal_duplicate_no_retry");
         request.RequestId = "uncertain-recovery";
-        request.BasedOnVersion = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot.ObservationVersion;
+        request.BasedOnVersion = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot.Version;
         game.LaunchStage = Stage.Preparing;
         Send(request);
         game.LaunchStage = Stage.AircraftSpawned;
         var view = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         provider.Results.TryDequeue(out var spawnedBytes);
         var spawned = OrderResult.Parser.ParseFrom(spawnedBytes);
-        Check(view.Instances.Any(unit => unit.UnitId.Equals(spawned.SpawnedUnitId)), "uncertain_recovers_ordinary_unit");
+        Check(spawned.SpawnedObservationId != null && view.Units.Any(unit => unit.Identity.Equals(spawned.SpawnedObservationId)),
+            "uncertain_recovers_spawned_observation_handle");
         provider.Invalidate();
         Check(game.LaunchResets == 1, "session_reset_calls_facade_cleanup");
         provider.Tick();
         Check(Send(request).Reason == "stale_session" && game.LaunchMutations == 2, "reset_blocks_previous_launch");
         var invalidHandle = request.Clone();
-        invalidHandle.SessionId = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot.Session.SessionId;
+        invalidHandle.SessionId = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot.SessionId;
         invalidHandle.RequestId = "old-handle";
         Check(Send(invalidHandle).Reason == "wrong_side_or_invalid_entity", "reset_blocks_previous_handle");
         var fresh = request.Clone();
         var current = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
-        fresh.SessionId = current.Session.SessionId;
-        fresh.UnitId = current.Instances[0].UnitId.Clone();
-        fresh.BasedOnVersion = current.ObservationVersion;
+        fresh.SessionId = current.SessionId;
+        fresh.Observation = current.Units[0].Identity.Clone();
+        fresh.BasedOnVersion = current.Version;
         fresh.RequestId = "active";
         game.LaunchStage = Stage.ExecutionUnknown;
         game.KeepUnknownLaunchTracking = true;
@@ -205,9 +211,9 @@ static class LaunchLifecycleTests
         provider.Invalidate();
         Check(game.LaunchResets == 2, "reset_uncertain_launch_cleans_up");
         current = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
-        fresh.SessionId = current.Session.SessionId;
-        fresh.UnitId = current.Instances[0].UnitId.Clone();
-        fresh.BasedOnVersion = current.ObservationVersion;
+        fresh.SessionId = current.SessionId;
+        fresh.Observation = current.Units[0].Identity.Clone();
+        fresh.BasedOnVersion = current.Version;
         game.LaunchAcceptance = Stage.NativeTaskCreated;
         game.LaunchStage = Stage.Preparing;
         Send(fresh);
@@ -224,14 +230,19 @@ static class LaunchLifecycleTests
         var snapshot = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         var request = new OrderRequest
         {
-            SessionId = snapshot.Session.SessionId,
+            SessionId = snapshot.SessionId,
             RequestId = "publication-failure",
-            UnitId = snapshot.Instances[0].UnitId.Clone(),
-            BasedOnVersion = snapshot.ObservationVersion,
-            AircraftLaunch = new AircraftLaunch
+            Observer = snapshot.Observer.Clone(),
+            Observation = snapshot.Units[0].Identity.Clone(),
+            BasedOnVersion = snapshot.Version,
+            LaunchAircraft = new LaunchAircraft
             {
-                UnitTypeId = new UnitTypeId { Value = "class" }, Squadron = "squadron",
-                LoadoutId = new LoadoutId { Value = "loadout" }, Count = 1
+                Selection = new AircraftSelection
+                {
+                    Type = new UnitTypeId { Value = "class" }, Squadron = "squadron",
+                    Loadout = new LoadoutId { Value = "loadout" }
+                },
+                Count = 1
             }
         };
         void FillStatuses()

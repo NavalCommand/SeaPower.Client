@@ -32,21 +32,22 @@ static class Program
             && UnitObservation.Descriptor.FindFieldByName("unit_id") == null
             && OrderRequest.Descriptor.FindFieldByName("unit_id") == null
             && OrderResult.Descriptor.FindFieldByName("spawned_unit_id") == null, "ordinary_wire_has_no_truth_identity");
-        Check(own.Name != null && own.Name.StateCase == StringKnowledge.StateOneofCase.Known
-            && own.Name.Known == game.Own.Name, "source_backed_own_name_preserved");
-        Check(own.Kinematics.SpeedMps.StateCase == DoubleKnowledge.StateOneofCase.Known
-            && own.Kinematics.SpeedMps.Known == 0, "known_zero_motion");
-        Check(own.Navigation.PlannedRoute.StateCase == RouteKnowledge.StateOneofCase.Known
-            && own.Navigation.PlannedRoute.Known.Points.Count == 0, "inspected_empty_route");
+        Check(own.Name == game.Own.Name, "source_backed_own_name_preserved");
+        Check(own.Kinematics.SpeedMps == 0 && own.Aircraft != null && own.Aircraft.HasAirborne && !own.Aircraft.Airborne
+            && !own.Kinematics.HasCourseOverGroundRad
+            && own.Kinematics.PositionStateCase == KinematicsObservation.PositionStateOneofCase.ExactPosition
+            && own.Kinematics.ExactPosition.HasLatitudeDeg && own.Kinematics.ExactPosition.HasLongitudeDeg
+            && own.Kinematics.ExactPosition.LatitudeDeg == game.Own.LatitudeDeg,
+            "exact_own_position_and_known_zero_false_unknown_values");
+        Check(own.Navigation.PlannedRoute != null && own.Navigation.PlannedRoute.Points.Count == 0, "inspected_empty_route");
         Check(observation.OrderAvailability.Single().Observation.Equals(ownId)
             && observation.OrderAvailability[0].Observer.Equals(view.Observer)
             && observation.OrderAvailability[0].BasedOnVersion == view.Version
             && observation.OrderAvailability[0].Eligibility.Items.Any(row => row.Kind == OrderKind.ReplaceRoute),
             "observer_scoped_typed_order_overlay");
-        var membership = view.Memberships.Items.Single();
+        var membership = view.Memberships.Single();
         Check(membership.Observation.Equals(ownId) && game.Own.TaskForceKey != game.SourceSessionKey
-            && membership.TaskForce.Known.Value != game.Own.TaskForceKey
-            && membership.Faction == null && view.Memberships.Coverage == CollectionCoverage.CoveragePartial,
+            && membership.TaskForce.Value != game.Own.TaskForceKey && membership.Faction == null,
             "observer_membership_uses_distinct_taskforce_handle");
         var secondProvider = new Provider(game, "other-observer");
         var otherView = ProviderObservation.Parser.ParseFrom(secondProvider.Tick()).Snapshot;
@@ -56,32 +57,36 @@ static class Program
         // Plotting records are independent observations, including ambiguous/fused/false records.
         game.Tracks = new[]
         {
-            new TrackSample { Key = game.Own.Key, LatitudeDeg = 1, LongitudeDeg = 2 },
+            new TrackSample { Key = game.Own.Key, LatitudeDeg = 1, LongitudeDeg = 2, LongitudeAvailable = false },
             new TrackSample { Key = "false-or-fused", LatitudeDeg = 1, LongitudeDeg = 2 }
         };
         var mixed = ProviderObservation.Parser.ParseFrom(provider.Tick());
         var contacts = mixed.Snapshot.Units.Where(unit => !unit.Identity.Equals(ownId)).ToArray();
         Check(mixed.Snapshot.Units.Count == 3 && contacts.Length == 2
             && contacts[0].Identity.Value != game.Own.Key && !contacts[0].Identity.Equals(contacts[1].Identity)
-            && contacts.All(contact => contact.Kinematics.Position.StateCase == PositionKnowledge.StateOneofCase.Estimated
-                && contact.Kinematics.Position.Estimated.Value.Coordinates.LatitudeDeg == 1),
-            "false_fused_and_duplicate_observations_without_truth_mapping");
-        Check(contacts.All(contact => (contact.Name == null || contact.Name.StateCase == StringKnowledge.StateOneofCase.None)
-                && contact.Type == null && contact.Equipment.Coverage == CollectionCoverage.CoverageUnknown)
+            && contacts.All(contact => contact.Kinematics.PositionStateCase == KinematicsObservation.PositionStateOneofCase.PartialPosition)
+            && contacts[0].Kinematics.PartialPosition.HasLatitudeDeg
+            && !contacts[0].Kinematics.PartialPosition.HasLongitudeDeg
+            && contacts[0].Kinematics.PartialPosition.LatitudeDeg == 1
+            && contacts[1].Kinematics.PartialPosition.HasLatitudeDeg
+            && contacts[1].Kinematics.PartialPosition.HasLongitudeDeg,
+            "false_fused_and_duplicate_partial_observations_without_truth_mapping");
+        Check(contacts.All(contact => !contact.HasName && contact.Type == null
+                && contact.Equipment.Count == 0 && contact.Contributors.Count == 0)
             && mixed.OrderAvailability.All(row => contacts.All(contact => !row.Observation.Equals(contact.Identity))),
-            "contacts_have_unknown_names_no_hidden_classification_or_authority");
-        Check(contacts.All(contact => contact.Evidence?.MeasuredAtSeconds == null
-                || contact.Evidence.MeasuredAtSeconds.StateCase == DoubleKnowledge.StateOneofCase.None),
+            "contacts_have_unknown_names_no_hidden_classification_authority_or_fabricated_contributors");
+        Check(contacts.All(contact => !contact.HasMeasuredAtSeconds),
             "plotting_contacts_have_no_invented_measurement_time");
         var stable = ProviderObservation.Parser.ParseFrom(provider.Tick());
         Check(stable.Snapshot.Units[0].Identity.Equals(ownId)
             && stable.Snapshot.Units[1].Identity.Equals(contacts[0].Identity)
             && stable.Snapshot.Units[2].Identity.Equals(contacts[1].Identity), "own_and_contact_handles_stable");
-        Check(stable.Snapshot.Memberships.Items.Single().TaskForce.Equals(membership.TaskForce), "taskforce_handle_stable");
+        Check(stable.Snapshot.Memberships.Single().TaskForce.Equals(membership.TaskForce), "taskforce_handle_stable");
         game.Tracks[0].PositionAvailable = false;
         var gap = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot;
         Check(gap.Units.Count == 3 && gap.Units[1].Identity.Equals(contacts[0].Identity)
-            && gap.Units[1].Kinematics.Position == null, "contact_gap_retains_identity_without_fabricating_position");
+            && gap.Units[1].Kinematics.PositionStateCase == KinematicsObservation.PositionStateOneofCase.None,
+            "contact_gap_retains_identity_without_fabricating_position");
         game.Tracks[0].PositionAvailable = true;
         Check(ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot.Units[1].Identity.Equals(contacts[0].Identity),
             "contact_record_retains_handle_after_coordinate_gap");
@@ -174,8 +179,8 @@ static class Program
         game.Own.HeadingRadians = 0;
         var unknown = ProviderObservation.Parser.ParseFrom(provider.Tick()).Snapshot.Units[0];
         Check(unknown.Navigation == null, "uninspected_route_unknown_even_with_partial_capture");
-        Check(unknown.Kinematics.HeadingRad.StateCase == DoubleKnowledge.StateOneofCase.Known
-            && unknown.Kinematics.HeadingRad.Known == 0 && unknown.Kinematics.CourseOverGroundRad == null,
+        Check(unknown.Kinematics.HasHeadingRad && unknown.Kinematics.HeadingRad == 0
+            && !unknown.Kinematics.HasCourseOverGroundRad,
             "source_heading_zero_not_course");
 
         bool wrongThread = false;
@@ -201,7 +206,7 @@ static class Program
         game.SourceSessionKey = "new-native-game";
         var afterChange = ProviderObservation.Parser.ParseFrom(provider.Tick());
         Check(afterChange.Snapshot.SessionId != beforeChange && game.LaunchResets == 1
-            && !afterChange.Snapshot.Memberships.Items.Single().TaskForce.Equals(membership.TaskForce),
+            && !afterChange.Snapshot.Memberships.Single().TaskForce.Equals(membership.TaskForce),
             "continuous_ready_session_and_relationship_handles_reset");
         Check(Send(request).Reason == "stale_session" && game.Mutations == 1, "session_change_rejects_old_order");
         provider.Invalidate();

@@ -119,8 +119,7 @@ public sealed class Provider
         {
             Observer = new ObserverId { Value = observerId },
             Ready = false,
-            SchemaVersion = 4,
-            Memberships = new ObservedRelationships { Coverage = CollectionCoverage.CoverageUnknown }
+            SchemaVersion = 4
         };
         snapshotQueue.Enqueue(new ProviderObservation { Snapshot = snapshot }.ToByteArray());
     }
@@ -185,7 +184,6 @@ public sealed class Provider
             Version = ++observationVersion,
             CapturedAtSeconds = gameFacade.OperationalSeconds,
             Truncated = units.Length > MaximumSnapshotItems || contacts.Length > MaximumSnapshotItems || units.Any(unit => unit.Truncated),
-            Memberships = new ObservedRelationships { Coverage = CollectionCoverage.CoverageUnknown },
         };
         var observation = new ProviderObservation { Snapshot = snapshot };
         foreach (var unit in units.Take(MaximumSnapshotItems))
@@ -195,26 +193,22 @@ public sealed class Provider
                 Identity = new ObservationId { Value = ownObservationIds[unit.Key] },
                 Kinematics = new KinematicsObservation
                 {
-                    Position = new PositionKnowledge
+                    ExactPosition = new GeoPoint
                     {
-                        Known = new PositionObservation
-                        {
-                            Coordinates = new GeoPoint { LatitudeDeg = unit.LatitudeDeg, LongitudeDeg = unit.LongitudeDeg }
-                        }
+                        LatitudeDeg = unit.LatitudeDeg,
+                        LongitudeDeg = unit.LongitudeDeg
                     },
-                    SpeedMps = new DoubleKnowledge { Known = unit.SpeedMetersPerSecond }
+                    SpeedMps = unit.SpeedMetersPerSecond
                 },
-                Evidence = new ObservationMetadata { MeasuredAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds } },
-                // Equipment capture is not implemented. Unknown inventory never means unarmed.
-                Equipment = new ObservedEquipment { Coverage = CollectionCoverage.CoverageUnknown }
+                MeasuredAtSeconds = gameFacade.OperationalSeconds
             };
             if (unit.Name != null)
             {
-                wireUnit.Name = new StringKnowledge { Known = unit.Name };
+                wireUnit.Name = unit.Name;
             }
             if (unit.HeadingRadians.HasValue)
             {
-                wireUnit.Kinematics.HeadingRad = new DoubleKnowledge { Known = unit.HeadingRadians.Value };
+                wireUnit.Kinematics.HeadingRad = unit.HeadingRadians.Value;
             }
             var discovery = new OrderDiscovery
             {
@@ -222,10 +216,7 @@ public sealed class Provider
                 Observer = new ObserverId { Value = observerId },
                 Observation = wireUnit.Identity.Clone(),
                 BasedOnVersion = snapshot.Version,
-                Eligibility = new OrderEligibilityState
-                {
-                    Coverage = unit.Truncated ? CollectionCoverage.CoveragePartial : CollectionCoverage.CoverageComplete
-                }
+                Eligibility = new OrderEligibilityState()
             };
             discovery.Eligibility.Items.Add(Eligibility(unit));
             discovery.Eligibility.Items.Add(RouteEligibility(unit, RouteMode.ReplaceRoute));
@@ -234,11 +225,11 @@ public sealed class Provider
             {
                 var route = new Route();
                 route.Points.Add(unit.Route.Select(point => point.Clone()));
-                wireUnit.Navigation = new NavigationObservation { PlannedRoute = new RouteKnowledge { Known = route } };
+                wireUnit.Navigation = new NavigationObservation { PlannedRoute = route };
             }
             if (unit.Airborne.HasValue)
             {
-                wireUnit.Aircraft = new AircraftObservation { Airborne = new BoolKnowledge { Known = unit.Airborne.Value } };
+                wireUnit.Aircraft = new AircraftObservation { Airborne = unit.Airborne.Value };
             }
             if (unit.LaunchSupported)
             {
@@ -247,46 +238,37 @@ public sealed class Provider
             observation.OrderAvailability.Add(discovery);
             if (unit.HasFacility)
             {
-                var inventoryCoverage = unit.InventoryCoverage;
                 wireUnit.AirOperations = new AirOperationsObservation
                 {
-                    Inventory = new AircraftInventory { Coverage = inventoryCoverage },
-                    PendingOperations = new UInt32Knowledge { Known = (uint)Math.Max(0, unit.PendingOperations) },
-                    MeasuredAtSeconds = new DoubleKnowledge { Known = gameFacade.OperationalSeconds }
+                    PendingOperations = (uint)Math.Max(0, unit.PendingOperations),
+                    MeasuredAtSeconds = gameFacade.OperationalSeconds
                 };
                 if (unit.OnboardCount.HasValue)
                 {
-                    wireUnit.AirOperations.OnboardCount = new UInt32Knowledge { Known = unit.OnboardCount.Value };
+                    wireUnit.AirOperations.OnboardCount = unit.OnboardCount.Value;
                 }
                 if (unit.ReservedCount.HasValue)
                 {
-                    wireUnit.AirOperations.ReservedCount = new UInt32Knowledge { Known = unit.ReservedCount.Value };
+                    wireUnit.AirOperations.ReservedCount = unit.ReservedCount.Value;
                 }
                 if (unit.CooldownCount.HasValue)
                 {
-                    wireUnit.AirOperations.CooldownCount = new UInt32Knowledge { Known = unit.CooldownCount.Value };
+                    wireUnit.AirOperations.CooldownCount = unit.CooldownCount.Value;
                 }
-                if (inventoryCoverage != CollectionCoverage.CoverageUnknown)
+                foreach (var inventory in unit.AircraftInventory.Take(MaximumAircraftInventoryEntries))
                 {
-                    foreach (var inventory in unit.AircraftInventory.Take(MaximumAircraftInventoryEntries))
+                    var entry = new AircraftInventoryEntry
                     {
-                        var entry = new AircraftInventoryEntry
-                        {
-                            Type = new UnitTypeIdKnowledge { Known = new UnitTypeId { Value = inventory.ClassKey } },
-                            Squadron = new StringKnowledge { Known = inventory.Squadron },
-                            Loadouts = new ObservedLoadouts
-                            {
-                                Coverage = unit.Truncated ? CollectionCoverage.CoveragePartial : CollectionCoverage.CoverageComplete
-                            }
-                        };
-                        if (inventory.Count.HasValue)
-                        {
-                            entry.UnreservedCount = new UInt32Knowledge { Known = (uint)Math.Max(0, inventory.Count.Value) };
-                        }
-                        entry.Loadouts.Items.Add(inventory.Loadouts.Take(MaximumAircraftInventoryEntries)
-                            .Select(loadout => new LoadoutId { Value = loadout }));
-                        wireUnit.AirOperations.Inventory.Items.Add(entry);
+                        Type = new UnitTypeId { Value = inventory.ClassKey },
+                        Squadron = inventory.Squadron
+                    };
+                    if (inventory.Count.HasValue)
+                    {
+                        entry.UnreservedCount = (uint)Math.Max(0, inventory.Count.Value);
                     }
+                    entry.Loadouts.Add(inventory.Loadouts.Take(MaximumAircraftInventoryEntries)
+                        .Select(loadout => new LoadoutId { Value = loadout }));
+                    wireUnit.AirOperations.Inventory.Add(entry);
                 }
             }
             if (!string.IsNullOrEmpty(unit.TaskForceKey))
@@ -296,11 +278,10 @@ public sealed class Provider
                     taskForceHandle = Guid.NewGuid().ToString("N");
                     taskForceHandles.Add(unit.TaskForceKey, taskForceHandle);
                 }
-                snapshot.Memberships.Coverage = CollectionCoverage.CoveragePartial;
-                snapshot.Memberships.Items.Add(new ObserverUnitRelationship
+                snapshot.Memberships.Add(new ObserverUnitRelationship
                 {
                     Observation = wireUnit.Identity.Clone(),
-                    TaskForce = new TaskForceIdKnowledge { Known = new TaskForceId { Value = taskForceHandle } }
+                    TaskForce = new TaskForceId { Value = taskForceHandle }
                 });
             }
             snapshot.Units.Add(wireUnit);
@@ -311,22 +292,20 @@ public sealed class Provider
             var wireContact = new UnitObservation
             {
                 Identity = new ObservationId { Value = contactObservationIds[contact.Key] },
-                Kinematics = new KinematicsObservation(),
-                // Native plotting cache has no verified sensor identity or measurement epoch.
-                Equipment = new ObservedEquipment { Coverage = CollectionCoverage.CoverageUnknown }
+                Kinematics = new KinematicsObservation()
             };
             if (contact.PositionAvailable)
             {
-                wireContact.Kinematics.Position = new PositionKnowledge
+                var position = new ObservedPosition();
+                if (contact.LatitudeAvailable)
                 {
-                    Estimated = new PositionKnowledge.Types.Estimate
-                    {
-                        Value = new PositionObservation
-                        {
-                            Coordinates = new GeoPoint { LatitudeDeg = contact.LatitudeDeg, LongitudeDeg = contact.LongitudeDeg }
-                        }
-                    }
-                };
+                    position.LatitudeDeg = contact.LatitudeDeg;
+                }
+                if (contact.LongitudeAvailable)
+                {
+                    position.LongitudeDeg = contact.LongitudeDeg;
+                }
+                wireContact.Kinematics.PartialPosition = position;
             }
             snapshot.Units.Add(wireContact);
         }
@@ -450,14 +429,11 @@ public sealed class Provider
         }
         if (availability.Items.Count == initialCount)
         {
-            bool knownEmptyInventory = unit.InventoryCoverage == CollectionCoverage.CoverageComplete
-                && unit.AircraftInventory.Count == 0;
             availability.Items.Add(new OrderEligibility
             {
                 Kind = OrderKind.LaunchAircraft,
-                Availability = unit.LaunchRestriction != "" || knownEmptyInventory ? Availability.Blocked : Availability.Unknown,
-                Reason = unit.LaunchRestriction != "" ? unit.LaunchRestriction
-                    : knownEmptyInventory ? "inventory_unavailable" : "launch_options_unknown"
+                Availability = unit.LaunchRestriction != "" ? Availability.Blocked : Availability.Unknown,
+                Reason = unit.LaunchRestriction != "" ? unit.LaunchRestriction : "launch_options_unreported"
             });
         }
     }

@@ -29,8 +29,9 @@ sealed class FakeGameFacade : IGameFacade
         Own = true,
         Supported = true,
         Controllable = true,
-        RouteInspected = true,
         RouteRestriction = "",
+        RouteInspected = true,
+        Airborne = false,
         LatitudeDeg = 61.96,
         LongitudeDeg = -10.37
     };

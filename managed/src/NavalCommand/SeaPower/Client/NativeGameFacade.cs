@@ -133,7 +133,6 @@ public sealed partial class NativeGameFacade : IGameFacade
             sample.Truncated = flightDeck._vehiclesOnBoard.Count() > MaximumStockSamples
                 || flightDeck._vehiclesOnBoard.Sum(vehicle => vehicle.Squadrons.Count) > MaximumStockSamples
                 || flightDeck._vehiclesOnBoard.Any(vehicle => vehicle.Loadouts.Count > MaximumStockSamples);
-            sample.InventoryCoverage = sample.Truncated ? CollectionCoverage.CoveragePartial : CollectionCoverage.CoverageComplete;
             foreach (var vehicleType in flightDeck._vehiclesOnBoard.OrderByDescending(vehicle => vehicle.Numbers > 0).Take(MaximumStockSamples))
             {
                 foreach (var squadron in vehicleType.Squadrons.OrderByDescending(squadron => squadron.Numbers > 0).Take(MaximumStockSamples - sample.AircraftInventory.Count))

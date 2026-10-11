@@ -28,7 +28,6 @@ public sealed class UnitSample
     public double SpeedMetersPerSecond;
     public double? HeadingRadians;
     public readonly List<AircraftInventorySample> AircraftInventory = new();
-    public NavalCommand.Gateway.Wire.CollectionCoverage InventoryCoverage;
     public int PendingOperations;
     public bool HasFacility;
     public bool Truncated;

@@ -21,8 +21,12 @@ public sealed class NativeGameFacade : IGameFacade
     readonly Dictionary<Taskforce, string> factionIds = new();
     readonly Dictionary<ObjectBase, string> unitIds = new();
     readonly Dictionary<Vehicle, string> observationIds = new();
-    // Capability IDs retain the real installation/launcher association internally.
+    // Type definitions may be shared by installations on different units.
     readonly Dictionary<string, BaseSystem> capabilitySystems = new();
+    // Each list matches that unit's exported Equipment vector by index. Multiple
+    // ammunition capabilities retain the same actual launcher reference; equal
+    // type IDs on separate units never overwrite their instance associations.
+    readonly Dictionary<string, List<BaseSystem>> instanceSystems = new();
     GameMain sourceGame;
     string nativeSession = "";
     public bool ApplyingControl { get; private set; }
@@ -256,9 +260,13 @@ public sealed class NativeGameFacade : IGameFacade
         return new Position { LatitudeDegrees = point.Latitude, LongitudeDegrees = point.Longitude, ElevationMeters = point._height };
     }
 
-    EquipmentInstance EquipmentState(BaseSystem system, string capability)
+    EquipmentInstance EquipmentState(BaseSystem system, string capability, string unitIdentity)
     {
-        capabilitySystems[capability] = system;
+        if (!capabilitySystems.ContainsKey(capability))
+        {
+            capabilitySystems.Add(capability, system);
+        }
+        instanceSystems[unitIdentity].Add(system);
         return new EquipmentInstance
         {
             Type = capability,
@@ -278,19 +286,19 @@ public sealed class NativeGameFacade : IGameFacade
         foreach (var sensor in sensors)
         {
             string capability = value.Type + "/" + sensor._sectionName + "/" + sensor._systemName;
-            value.Equipment.Add(EquipmentState(sensor, capability));
+            value.Equipment.Add(EquipmentState(sensor, capability, value.Id));
         }
         foreach (var snorkel in unit._obp._systems.Concat(unit._obp._miscSystems).OfType<SnorkelMastSystem>().Distinct())
         {
             string capability = value.Type + "/" + snorkel._sectionName + "/" + snorkel._systemName;
-            value.Equipment.Add(EquipmentState(snorkel, capability));
+            value.Equipment.Add(EquipmentState(snorkel, capability, value.Id));
         }
         foreach (var weapon in unit._obp._weaponSystems.Concat(unit._obp._systems.OfType<WeaponSystem>()).Distinct())
         {
             foreach (string ammunition in weapon._associatedAmmunitionNames.Concat(weapon._loadedAmmunitionCount.Keys).Distinct())
             {
                 string capability = value.Type + "/" + weapon._sectionName + "/" + ammunition;
-                var equipment = EquipmentState(weapon, capability);
+                var equipment = EquipmentState(weapon, capability, value.Id);
                 int readyRounds = weapon.getLoadedAmmoCount(ammunition);
                 // Magazine-fed guns use a shared ready-round counter. The
                 // ammunition-specific magazine count is the actual inventory;
@@ -337,6 +345,7 @@ public sealed class NativeGameFacade : IGameFacade
         {
             throw new InvalidOperationException("native_unit_equipment_unavailable");
         }
+        instanceSystems.Add(result.Id, new List<BaseSystem>());
         CaptureEquipment(unit, result);
         return result;
     }
@@ -443,6 +452,7 @@ public sealed class NativeGameFacade : IGameFacade
         var units = factions.SelectMany(faction => faction._taskforceUnits).Where(unit => unit != null && !unit.IsDestroyed).Distinct().ToArray();
         var publication = new Publication { Session = session, Revision = revision, CapturedAtSeconds = GameTime.missionElapsedTime };
         capabilitySystems.Clear();
+        instanceSystems.Clear();
         var unitValues = units.ToDictionary(unit => unit, CaptureUnit);
         var liveTracks = new HashSet<Vehicle>();
         foreach (var scope in new Taskforce[] { null }.Concat(factions))
@@ -532,6 +542,7 @@ public sealed class NativeGameFacade : IGameFacade
         unitIds.Clear();
         observationIds.Clear();
         capabilitySystems.Clear();
+        instanceSystems.Clear();
         sourceGame = null;
         nativeSession = "";
     }

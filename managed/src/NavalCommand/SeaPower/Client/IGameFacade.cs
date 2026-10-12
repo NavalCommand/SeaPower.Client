@@ -1,31 +1,18 @@
-using System.Collections.Generic;
+using NavalCommand.Gateway.Wire;
 
 namespace NavalCommand.SeaPower.Client;
-// Called exclusively by Provider's owning engine thread. All return values are plain data.
+
+// Every call is on the owning engine thread. Returned publications contain
+// copied wire values only; native object references never cross this boundary.
 public interface IGameFacade
 {
-    bool Ready
-    {
-        get;
-    }
-
-    double OperationalSeconds
-    {
-        get;
-    }
-
-    // Changes when native game or observer ownership context changes, even if ready.
-    string SessionKey
-    {
-        get;
-    }
-
-    IReadOnlyList<UnitSample> CaptureUnits();
-    IReadOnlyList<TrackSample> CaptureTracks();
-    UnitSample Resolve(string key);
-    bool AppendWaypoint(string key, double latitudeDeg, double longitudeDeg, string label);
-    RouteMutation UpdateRoute(string key, double latitudeDeg, double longitudeDeg, string label, NavalCommand.Gateway.Wire.RouteMode mode);
-    LaunchProgress LaunchFacility(string key, NavalCommand.Gateway.Wire.LaunchAircraft request);
-    LaunchProgress PollLaunch(string token);
+    bool Ready { get; }
+    string SessionKey { get; }
+    bool Paused { get; }
+    double SelectedCompression { get; }
+    bool SupportsCompression(double factor);
+    void ApplyPause(bool paused);
+    void SelectCompression(double factor, bool remainPaused);
+    Publication Capture(string session, ulong revision, bool paused, double selectedCompression);
     void Reset();
 }

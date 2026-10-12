@@ -1,48 +1,43 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using SeaPower;
 using NavalCommand.Gateway.Wire;
-using NodeCanvas.BehaviourTrees;
+using NativeAircraft = SeaPower.Aircraft;
+using Effect = NavalCommand.Gateway.Wire.Effect;
 
 namespace NavalCommand.SeaPower.Client;
 
-public sealed partial class NativeGameFacade : IGameFacade
+public sealed class NativeGameFacade : IGameFacade
 {
-    private const double MetersPerNauticalMile = 1852.0;
-    private const double SecondsPerHour = 3600.0;
-    private const int MaximumUnitSamplesWithOverflow = 129;
-    private const int MaximumTrackSamples = 129;
-    private const int MaximumStockSamples = 12;
-    // This inspected game build uses this lower bound for side-local foreign contact keys.
-    private const int FirstForeignContactId = 7001;
-    private const int WaypointTelegraphSetting = 2;
-    private const int PreserveTelegraphSetting = -2;
-    readonly Dictionary<ObjectBase, string> unitKeys = new();
-    readonly Dictionary<string, ObjectBase> unitsByKey = new();
-    readonly Dictionary<Vehicle, string> contactKeys = new();
-    Taskforce sourceTaskforce;
+    const double MetersPerSecondPerKnot = 1852.0 / 3600.0;
+    const double DegreesToRadians = Math.PI / 180.0;
+    const double NativeEllipseMetersPerDegree = 111120.0;
+    static readonly FieldInfo ValuesField = typeof(GameTime).GetField("_timeScaleValues", BindingFlags.NonPublic | BindingFlags.Static);
+    static readonly FieldInfo IndexField = typeof(GameTime).GetField("_currentTimeScaleIndex", BindingFlags.NonPublic | BindingFlags.Static);
+    static readonly FieldInfo MaximumField = typeof(GameTime).GetField("_maxTimeCompression", BindingFlags.NonPublic | BindingFlags.Static);
+    readonly Dictionary<Taskforce, string> factionIds = new();
+    readonly Dictionary<ObjectBase, string> unitIds = new();
+    readonly Dictionary<Vehicle, string> observationIds = new();
+    // Capability IDs retain the real installation/launcher association internally.
+    readonly Dictionary<string, BaseSystem> capabilitySystems = new();
     GameMain sourceGame;
-    string sourceSessionKey = "";
-    string sourceTaskforceKey = "";
+    string nativeSession = "";
+    public bool ApplyingControl { get; private set; }
 
-    public string SessionKey
+    public void ObserveNativeCompression(float factor)
     {
-        get
+        AssertEngineThread();
+        var values = (List<float>)ValuesField.GetValue(null);
+        int index = values.IndexOf(factor);
+        if (index >= 0)
         {
-            AssertEngineThread();
-            var currentGame = Singleton<GameMain>.Instance;
-            if (!ReferenceEquals(sourceGame, currentGame) || !ReferenceEquals(sourceTaskforce, Globals._playerTaskforce))
-            {
-                sourceGame = currentGame;
-                sourceTaskforce = Globals._playerTaskforce;
-                sourceSessionKey = Guid.NewGuid().ToString("N");
-                sourceTaskforceKey = sourceTaskforce == null ? "" : Guid.NewGuid().ToString("N");
-            }
-            return sourceSessionKey;
+            IndexField.SetValue(null, index);
         }
     }
+
     void AssertEngineThread()
     {
         if (Globals.mainThread != Thread.CurrentThread)
@@ -57,345 +52,487 @@ public sealed partial class NativeGameFacade : IGameFacade
         {
             AssertEngineThread();
             return Singleton<GameMain>.InstanceExists() && Singleton<GameMain>.Instance._initialized && !Singleton<GameMain>.Instance._closing
-                && Globals._playerTaskforce != null && Singleton<SceneCreator>.Instance.IsLoadingDone && !Singleton<LoadScreen>.Instance.cameraObject.enabled;
+                && Singleton<TaskforceManager>.InstanceExists() && Singleton<SceneCreator>.InstanceExists()
+                && Singleton<SceneCreator>.Instance.IsLoadingDone;
         }
     }
 
-    public double OperationalSeconds
+    public string SessionKey
     {
         get
         {
             AssertEngineThread();
-            return GameTime.missionElapsedTime;
+            var current = Singleton<GameMain>.Instance;
+            if (!ReferenceEquals(sourceGame, current))
+            {
+                Reset();
+                sourceGame = current;
+                nativeSession = Guid.NewGuid().ToString("N");
+            }
+            return nativeSession;
         }
+    }
+
+    public bool Paused
+    {
+        get
+        {
+            AssertEngineThread();
+            return GameTime.IsPaused();
+        }
+    }
+
+    public double SelectedCompression
+    {
+        get
+        {
+            AssertEngineThread();
+            if (GameTime.TimeCompression > 0.05f)
+            {
+                return GameTime.TimeCompression;
+            }
+            var values = (List<float>)ValuesField.GetValue(null);
+            int index = (int)IndexField.GetValue(null);
+            return values[index];
+        }
+    }
+
+    public bool SupportsCompression(double factor)
+    {
+        AssertEngineThread();
+        if (double.IsNaN(factor) || double.IsInfinity(factor) || factor <= 0)
+        {
+            return false;
+        }
+        var values = (List<float>)ValuesField.GetValue(null);
+        float maximum = (float)MaximumField.GetValue(null);
+        return factor <= maximum && values.Contains((float)factor);
+    }
+
+    public void ApplyPause(bool paused)
+    {
+        AssertEngineThread();
+        if (GameTime.IsPaused() == paused)
+        {
+            return;
+        }
+        ApplyingControl = true;
+        try
+        {
+            if (paused)
+            {
+                GameTime.Pause();
+            }
+            else
+            {
+                GameTime.UnPause();
+            }
+        }
+        finally
+        {
+            ApplyingControl = false;
+        }
+    }
+
+    public void SelectCompression(double factor, bool remainPaused)
+    {
+        AssertEngineThread();
+        var values = (List<float>)ValuesField.GetValue(null);
+        int index = values.IndexOf((float)factor);
+        if (index < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(factor));
+        }
+        ApplyingControl = true;
+        try
+        {
+            if (remainPaused)
+            {
+                // Selecting the resume factor must not invoke the positive setter:
+                // it would unpause and complete pending flight-deck preparations.
+                IndexField.SetValue(null, index);
+            }
+            else
+            {
+                GameTime.SetTimeCompression((float)factor);
+            }
+        }
+        finally
+        {
+            ApplyingControl = false;
+        }
+    }
+
+    string FactionId(Taskforce faction)
+    {
+        if (!factionIds.TryGetValue(faction, out var id))
+        {
+            var name = faction._nameInMissionFile;
+            id = string.IsNullOrWhiteSpace(name) ? "faction-" + Guid.NewGuid().ToString("N") : name;
+            if (factionIds.Values.Contains(id))
+            {
+                id += "-" + Guid.NewGuid().ToString("N");
+            }
+            factionIds.Add(faction, id);
+        }
+        return id;
+    }
+
+    string UnitId(ObjectBase unit)
+    {
+        if (!unitIds.TryGetValue(unit, out var id))
+        {
+            id = "unit-" + Guid.NewGuid().ToString("N");
+            unitIds.Add(unit, id);
+        }
+        return id;
+    }
+
+    static Result Unavailable()
+    {
+        return new Result { Failure = new Failure { Infrastructure = new InfrastructureError { Condition = 4 } } };
+    }
+
+    Result EquipmentDefinition(string capability)
+    {
+        var system = capabilitySystems[capability];
+        if (system is not SensorSystem)
+        {
+            // Weapon burst costs, target inputs and shared launcher constraints
+            // require a complete source mapping before publishing definitions.
+            return Unavailable();
+        }
+        int mode;
+        switch (system._systemType)
+        {
+            case BaseSystem.SystemType.SensorSearchRadar:
+            case BaseSystem.SystemType.SensorFCRadar:
+                mode = 0;
+                break;
+            case BaseSystem.SystemType.SensorSonar:
+                mode = 1;
+                break;
+            case BaseSystem.SystemType.SensorESM:
+                mode = 2;
+                break;
+            case BaseSystem.SystemType.SensorVisual:
+            case BaseSystem.SystemType.SensorPeriscope:
+            case BaseSystem.SystemType.SensorInfrared:
+                mode = 3;
+                break;
+            case BaseSystem.SystemType.SensorECM:
+                var jammer = new EquipmentType { Id = capability };
+                jammer.Effects.Add(new Effect { Jamming = new Empty() });
+                jammer.Operations.Add(new EquipmentOperation { AcceptedTargets = 1, Invocation = 1 });
+                return new Result { EquipmentType = jammer };
+            case BaseSystem.SystemType.TowedDecoy:
+                var decoy = new EquipmentType { Id = capability };
+                decoy.Effects.Add(new Effect { Deception = new Empty() });
+                decoy.Operations.Add(new EquipmentOperation { AcceptedTargets = 1, Invocation = 1 });
+                return new Result { EquipmentType = decoy };
+            default:
+                return Unavailable();
+        }
+        var definition = new EquipmentType { Id = capability };
+        definition.Effects.Add(new Effect { Sensing = new Effect.Types.Sensing { Mode = mode } });
+        definition.Operations.Add(new EquipmentOperation { AcceptedTargets = 1, Invocation = 1 });
+        return new Result { EquipmentType = definition };
+    }
+
+    static void Add(ScopedPublication view, Query.Types.Method method, Result value, string id = "", string second = "")
+    {
+        view.Entries.Add(new Entry { Query = new Query { Method = method, Id = id, SecondId = second }, Result = value });
+    }
+
+    static Strings Ids(IEnumerable<string> ids)
+    {
+        var value = new Strings();
+        value.Values.Add(ids);
+        return value;
+    }
+
+    static Position Position(GeoPosition point)
+    {
+        return new Position { LatitudeDegrees = point.Latitude, LongitudeDegrees = point.Longitude, ElevationMeters = point._height };
+    }
+
+    EquipmentInstance EquipmentState(BaseSystem system, string capability)
+    {
+        capabilitySystems[capability] = system;
+        return new EquipmentInstance
+        {
+            Type = capability,
+            OperationalState = system.IsDestroyed || system.Inoperable.Value ? 2 : system.IsOn.Value ? 1 : 0,
+            Damage = system.IsDestroyed ? 2 : system.CurrentDamageType == DamageValues.DamageType.No ? 0 : 1
+        };
+    }
+
+    void CaptureEquipment(ObjectBase unit, Unit value)
+    {
+        // Towed decoys are reusable sensor-derived systems attached to a cable;
+        // their ammunition descriptor is not an expendable inventory.
+        var sensors = unit._obp._sensorSystems
+            .Concat(unit._obp._systems.OfType<SensorSystem>())
+            .Concat(unit._obp._towedSystems.Select(system => system._towedDecoy).Where(decoy => decoy != null))
+            .Distinct();
+        foreach (var sensor in sensors)
+        {
+            string capability = value.Type + "/" + sensor._sectionName + "/" + sensor._systemName;
+            value.Equipment.Add(EquipmentState(sensor, capability));
+        }
+        foreach (var snorkel in unit._obp._systems.Concat(unit._obp._miscSystems).OfType<SnorkelMastSystem>().Distinct())
+        {
+            string capability = value.Type + "/" + snorkel._sectionName + "/" + snorkel._systemName;
+            value.Equipment.Add(EquipmentState(snorkel, capability));
+        }
+        foreach (var weapon in unit._obp._weaponSystems.Concat(unit._obp._systems.OfType<WeaponSystem>()).Distinct())
+        {
+            foreach (string ammunition in weapon._associatedAmmunitionNames.Concat(weapon._loadedAmmunitionCount.Keys).Distinct())
+            {
+                string capability = value.Type + "/" + weapon._sectionName + "/" + ammunition;
+                var equipment = EquipmentState(weapon, capability);
+                int readyRounds = weapon.getLoadedAmmoCount(ammunition);
+                // Magazine-fed guns use a shared ready-round counter. The
+                // ammunition-specific magazine count is the actual inventory;
+                // readiness still comes from the native per-capability query.
+                int count = weapon is WeaponSystemGun && weapon._vwp?._associatedMagazine != null
+                    ? weapon.getMagazineAmmoCount(ammunition) : readyRounds;
+                if (count < 0)
+                {
+                    throw new InvalidOperationException("negative_native_ammunition_count");
+                }
+                equipment.Inventory = new EquipmentInstance.Types.ResourceInventory
+                {
+                    ResourceId = ammunition, Quantity = new ResourceValue { Discrete = (ulong)count }
+                };
+                bool engaging = weapon._executingEngageTask;
+                bool selected = weapon._ammoForEngage?._ap?._ammunitionFileName == ammunition;
+                bool unavailable = equipment.OperationalState == 2 || count == 0 || readyRounds == 0 || weapon._isReloading || weapon._isOffline || (engaging && !selected);
+                equipment.OperationalState = unavailable ? 2 : engaging && selected ? 1 : 0;
+                value.Equipment.Add(equipment);
+            }
+        }
+    }
+
+    Unit CaptureUnit(ObjectBase unit)
+    {
+        var result = new Unit
+        {
+            Id = UnitId(unit), Name = unit.name, Type = unit.getObjectIniName(), Faction = FactionId(unit._taskforce),
+            Kinematics = new UnitKinematics
+            {
+                Position = Position(unit._geoPosition), SpeedMetersPerSecond = unit._velocityInKnots * MetersPerSecondPerKnot,
+                HeadingRadians = unit.Heading.Value * DegreesToRadians
+            }
+        };
+        if (unit is NativeAircraft aircraft)
+        {
+            result.Aircraft = new Gateway.Wire.Aircraft { Airborne = aircraft._isInFlight && string.IsNullOrEmpty(unit._flightDeckState) };
+        }
+        else if (unit is Helicopter helicopter)
+        {
+            result.Aircraft = new Gateway.Wire.Aircraft { Airborne = helicopter._isInFlight && string.IsNullOrEmpty(unit._flightDeckState) };
+        }
+        if (unit._obp == null)
+        {
+            throw new InvalidOperationException("native_unit_equipment_unavailable");
+        }
+        CaptureEquipment(unit, result);
+        return result;
+    }
+
+    static Operations CaptureOperations(ObjectBase unit)
+    {
+        var result = new Operations();
+        var stateName = unit.StateMachine?.CurrentState?.GetType().Name;
+        if (stateName == "AdvancedMissileEvasion" || stateName == "EvadeMissile" || stateName == "TorpedoEvasion")
+        {
+            result.Evading = new Evasion();
+        }
+        if (unit._userRoot != null)
+        {
+            var tasks = unit._userRoot.TaskViewModels.Select(view => view.Task).ToArray();
+            // Only publish a complete route when every native task is navigation.
+            // A mixed/unknown task graph does not mean an empty route.
+            if (tasks.All(task => task is GoToWaypointTask))
+            {
+                result.Navigation = new Navigation();
+                foreach (var task in tasks.Cast<GoToWaypointTask>())
+                {
+                    result.Navigation.Route.Add(new Gateway.Wire.Waypoint { Target = Position(task.WaypointPosition), Label = task.wpName.value ?? "" });
+                }
+                if (tasks.Length > 0 && result.ActivityCase == Operations.ActivityOneofCase.None)
+                {
+                    result.MovingToWaypoint = Position(tasks[0].WaypointPosition);
+                }
+            }
+        }
+        var deck = unit._obp?._flightDeck;
+        if (deck != null)
+        {
+            result.AirOperations = new AirOperations
+            {
+                Inventory = new AirOperations.Types.Inventory(),
+                OnboardCount = checked((uint)deck.AircraftCurrentlyOnBoard),
+                PendingOperations = checked((uint)deck.FlightDeckTasks.Count),
+                ReservedCount = checked((uint)deck.FlightDeckTasks.OfType<PendingLaunchTask>().Sum(task => task.LaunchCount)),
+                CooldownCount = checked((uint)deck.FlightDeckTasks.OfType<CoolDownTask>().Count())
+            };
+            foreach (var vehicle in deck._vehiclesOnBoard)
+            {
+                foreach (var squadron in vehicle.Squadrons)
+                {
+                    var inventory = new AircraftInventory
+                    {
+                        Type = vehicle._fileName, Squadron = squadron._name,
+                        Loadouts = Ids(vehicle.Loadouts.Select(loadout => loadout.Name))
+                    };
+                    result.AirOperations.Inventory.Entries.Add(inventory);
+                }
+            }
+        }
+        return result;
+    }
+
+    Observation CaptureObservation(Vehicle track, Taskforce observer)
+    {
+        if (!observationIds.TryGetValue(track, out var id))
+        {
+            id = "observation-" + Guid.NewGuid().ToString("N");
+            observationIds.Add(track, id);
+        }
+        var partial = new PartialPosition();
+        var result = new Observation
+        {
+            Id = id, Name = "Track " + track.Id, ObserverFaction = FactionId(observer),
+            Kinematics = new ObservationKinematics { Position = new ObservedPosition { Partial = partial } }
+        };
+        // Whitelist observer estimates only. Never serialize Object/BaseObject
+        // names, faction, position, velocity or class from this privileged wrapper.
+        var estimate = track.PositionEstimate;
+        if (estimate.HasValue)
+        {
+            partial.LatitudeDegrees = estimate.Value.Item1.Latitude;
+            partial.LongitudeDegrees = estimate.Value.Item1.Longitude;
+            var ellipse = track.ErrorEllipse;
+            if (ellipse != null)
+            {
+                partial.ErrorEllipse = new ErrorEllipse
+                {
+                    MajorAxisMeters = ellipse.SemiMajorAxis * NativeEllipseMetersPerDegree,
+                    MinorAxisMeters = ellipse.SemiMinorAxis * NativeEllipseMetersPerDegree,
+                    OrientationRadians = ellipse.Heading * DegreesToRadians
+                };
+            }
+        }
+        if (track.Side.HasValue && track.Side.Value.Value != null)
+        {
+            result.ObservedFaction = FactionId(track.Side.Value.Value);
+        }
+        if (track.Class.HasValue && !string.IsNullOrEmpty(track.Class.Value.Value))
+        {
+            result.Type = track.Class.Value.Value;
+        }
+        return result;
+    }
+
+    public Publication Capture(string session, ulong revision, bool paused, double selectedCompression)
+    {
+        AssertEngineThread();
+        var factions = Singleton<TaskforceManager>.Instance._taskForces.Where(faction => faction != null).ToArray();
+        var units = factions.SelectMany(faction => faction._taskforceUnits).Where(unit => unit != null && !unit.IsDestroyed).Distinct().ToArray();
+        var publication = new Publication { Session = session, Revision = revision, CapturedAtSeconds = GameTime.missionElapsedTime };
+        capabilitySystems.Clear();
+        var unitValues = units.ToDictionary(unit => unit, CaptureUnit);
+        var liveTracks = new HashSet<Vehicle>();
+        foreach (var scope in new Taskforce[] { null }.Concat(factions))
+        {
+            var view = new ScopedPublication { Scope = scope == null ? new Scope { Omniscient = new Empty() } : new Scope { Faction = FactionId(scope) } };
+            var visible = units.Where(unit => scope == null || unit._taskforce == scope).ToArray();
+            Add(view, Query.Types.Method.UnitIds, new Result { Ids = Ids(visible.Select(UnitId)) });
+            foreach (var unit in visible)
+            {
+                Add(view, Query.Types.Method.Unit, new Result { Unit = unitValues[unit] }, UnitId(unit));
+                Add(view, Query.Types.Method.Operations, new Result { Operations = CaptureOperations(unit) }, UnitId(unit));
+            }
+            var observations = new List<Observation>();
+            if (scope != null && scope.PlottingTable != null)
+            {
+                foreach (var track in scope.PlottingTable.Vehicles)
+                {
+                    // The hidden pointer is used solely to exclude the faction's
+                    // own authoritative units, never to manufacture observations.
+                    if (track.Object != null && track.Object._taskforce == scope)
+                    {
+                        continue;
+                    }
+                    liveTracks.Add(track);
+                    observations.Add(CaptureObservation(track, scope));
+                }
+            }
+            Add(view, Query.Types.Method.ObservationIds, scope != null && scope.PlottingTable == null ? Unavailable() : new Result { Ids = Ids(observations.Select(track => track.Id)) });
+            foreach (var observation in observations)
+            {
+                Add(view, Query.Types.Method.Observation, new Result { Observation = observation }, observation.Id);
+            }
+            Add(view, Query.Types.Method.FactionIds, new Result { Ids = Ids(factions.Select(FactionId)) });
+            foreach (var first in factions)
+            {
+                foreach (var second in factions)
+                {
+                    var native = first.RelationshipTo(second);
+                    int alignment = native == RelationsState.Friendly ? 0 : native == RelationsState.Neutral ? 1 : 2;
+                    Add(view, Query.Types.Method.FactionAlignment, new Result { Alignment = alignment }, FactionId(first), FactionId(second));
+                }
+            }
+            Add(view, Query.Types.Method.Time, new Result { TimeSeconds = GameTime.missionElapsedTime });
+            Add(view, Query.Types.Method.Paused, new Result { Boolean = paused });
+            Add(view, Query.Types.Method.CanPause, new Result { Boolean = true });
+            Add(view, Query.Types.Method.CanUnpause, new Result { Boolean = true });
+            Add(view, Query.Types.Method.Compression, new Result { Compression = selectedCompression });
+            var visibleTypes = visible.Select(unit => unitValues[unit].Type).Distinct().ToArray();
+            Add(view, Query.Types.Method.UnitTypeIds, new Result { Ids = Ids(visibleTypes) });
+            foreach (string type in visibleTypes)
+            {
+                // Complete native loadout definitions are not yet mapped.
+                Add(view, Query.Types.Method.UnitType, Unavailable(), type);
+            }
+            var equipment = visible.SelectMany(unit => unitValues[unit].Equipment).ToArray();
+            var equipmentTypes = equipment.Select(instance => instance.Type).Distinct().ToArray();
+            Add(view, Query.Types.Method.EquipmentTypeIds, new Result { Ids = Ids(equipmentTypes) });
+            foreach (string capability in equipmentTypes)
+            {
+                Add(view, Query.Types.Method.EquipmentType, EquipmentDefinition(capability), capability);
+            }
+            var resources = equipment.Where(instance => instance.Inventory != null).Select(instance => instance.Inventory.ResourceId).Distinct().ToArray();
+            Add(view, Query.Types.Method.ResourceIds, new Result { Ids = Ids(resources) });
+            foreach (string resource in resources)
+            {
+                var definitions = new ResourceDefinitions();
+                definitions.Values.Add(new ResourceDefinition { Id = resource, Representation = 0, Unit = 0, Accounting = 0 });
+                Add(view, Query.Types.Method.ResourceDefinitions, new Result { Resources = definitions }, resource);
+            }
+            publication.Views.Add(view);
+        }
+        foreach (var expired in observationIds.Keys.Where(track => !liveTracks.Contains(track)).ToArray())
+        {
+            observationIds.Remove(expired);
+        }
+        foreach (var expired in unitIds.Keys.Where(unit => !units.Contains(unit)).ToArray())
+        {
+            unitIds.Remove(expired);
+        }
+        return publication;
     }
 
     public void Reset()
     {
         AssertEngineThread();
-        unitKeys.Clear();
-        unitsByKey.Clear();
-        contactKeys.Clear();
-        ClearLaunches();
-    }
-
-    UnitSample SampleUnit(ObjectBase nativeUnit, string unitKey)
-    {
-        _ = SessionKey;
-        bool isOwnUnit = nativeUnit != null && !nativeUnit.IsDestroyed && nativeUnit.UnitTaskforce.Value == Globals._playerTaskforce
-            && Globals._playerTaskforce._taskforceUnits.Contains(nativeUnit);
-        if (!isOwnUnit)
-        {
-            return null;
-        }
-
-        var state = nativeUnit.StateMachine?.CurrentState;
-        var stateName = state?.GetType().Name;
-        var sample = new UnitSample
-        {
-            Key = unitKey,
-            Name = nativeUnit.name,
-            Own = true,
-            Supported = nativeUnit is Vessel || nativeUnit is Aircraft || nativeUnit is Helicopter,
-            Controllable = nativeUnit.HasControl && nativeUnit.IsControllable && nativeUnit.AcceptsOrdersFromPlayer && nativeUnit._userRoot != null,
-            Protected = state is AircraftStates.AdvancedMissileEvasion || stateName == "EvadeMissile" || stateName == "TorpedoEvasion"
-                || stateName == "CounterLaunch",
-            Grounded = (nativeUnit is Aircraft aircraft && !aircraft._isInFlight) || (nativeUnit is Helicopter helicopter && !helicopter._isInFlight)
-                || !string.IsNullOrEmpty(nativeUnit._flightDeckState),
-            Formation = nativeUnit.Formation != null,
-            RouteSupported = nativeUnit is Vessel,
-            SelectedTask = nativeUnit._userRoot?.SelectedTask != null,
-            LatitudeDeg = nativeUnit._geoPosition.Latitude,
-            LongitudeDeg = nativeUnit._geoPosition.Longitude,
-            SpeedMetersPerSecond = nativeUnit._velocityInKnots * MetersPerNauticalMile / SecondsPerHour,
-            // Heading is orientation, not course over ground. Reactive native value is degrees.
-            HeadingRadians = nativeUnit.transform != null ? nativeUnit.Heading.Value * Math.PI / 180.0 : null
-        };
-        var flightDeck = nativeUnit._obp?._flightDeck;
-        InspectRoute(nativeUnit, sample);
-        if (nativeUnit is Aircraft sampledAircraft)
-        {
-            sample.Airborne = sampledAircraft._isInFlight && string.IsNullOrEmpty(nativeUnit._flightDeckState);
-        }
-        if (nativeUnit is Helicopter sampledHelicopter)
-        {
-            sample.Airborne = sampledHelicopter._isInFlight && string.IsNullOrEmpty(nativeUnit._flightDeckState);
-        }
-        sample.LaunchSupported = nativeUnit is LandUnit && flightDeck != null;
-        sample.LaunchRestriction = FacilityRestriction(nativeUnit);
-        if (flightDeck != null)
-        {
-            sample.HasFacility = true;
-            sample.OnboardCount = (uint)Math.Max(0, flightDeck.AircraftCurrentlyOnBoard);
-            sample.ReservedCount = (uint)flightDeck.FlightDeckTasks.OfType<PendingLaunchTask>().Sum(task => Math.Max(0, task.LaunchCount));
-            sample.CooldownCount = (uint)flightDeck.FlightDeckTasks.OfType<CoolDownTask>().Count();
-            sample.PendingOperations = flightDeck.FlightDeckTasks.Count;
-            sample.Truncated = flightDeck._vehiclesOnBoard.Count() > MaximumStockSamples
-                || flightDeck._vehiclesOnBoard.Sum(vehicle => vehicle.Squadrons.Count) > MaximumStockSamples
-                || flightDeck._vehiclesOnBoard.Any(vehicle => vehicle.Loadouts.Count > MaximumStockSamples);
-            foreach (var vehicleType in flightDeck._vehiclesOnBoard.OrderByDescending(vehicle => vehicle.Numbers > 0).Take(MaximumStockSamples))
-            {
-                foreach (var squadron in vehicleType.Squadrons.OrderByDescending(squadron => squadron.Numbers > 0).Take(MaximumStockSamples - sample.AircraftInventory.Count))
-                {
-                    var stock = new AircraftInventorySample
-                    {
-                        ClassKey = vehicleType._fileName,
-                        Squadron = squadron._name,
-                        Count = squadron.Numbers
-                    };
-                    stock.Loadouts.AddRange(vehicleType.Loadouts.Take(MaximumStockSamples).Select(loadout => loadout.Name));
-                    if (sample.LaunchSupported)
-                    {
-                        foreach (var loadout in vehicleType.Loadouts.Take(MaximumStockSamples))
-                        {
-                            string restriction = LaunchRestriction(nativeUnit, vehicleType, squadron, loadout);
-                            stock.LaunchOptions.Add(new AircraftInventorySample.LaunchOptionSample
-                            {
-                                Loadout = loadout.Name,
-                                Availability = restriction == "" ? Availability.Executable : Availability.Blocked,
-                                Reason = restriction
-                            });
-                        }
-                    }
-                    sample.AircraftInventory.Add(stock);
-                }
-            }
-        }
-
-        return sample;
-    }
-
-    public IReadOnlyList<UnitSample> CaptureUnits()
-    {
-        AssertEngineThread();
-        var ownUnits = Globals._playerTaskforce._taskforceUnits.Where(nativeUnit => nativeUnit != null
-            && !nativeUnit.IsDestroyed).Take(MaximumUnitSamplesWithOverflow).ToArray();
-        foreach (var removedUnit in unitKeys.Keys.Where(nativeUnit => !ownUnits.Contains(nativeUnit)).ToArray())
-        {
-            unitsByKey.Remove(unitKeys[removedUnit]);
-            unitKeys.Remove(removedUnit);
-        }
-
-        var samples = new List<UnitSample>();
-        foreach (var nativeUnit in ownUnits)
-        {
-            if (!unitKeys.TryGetValue(nativeUnit, out var unitKey))
-            {
-                unitKey = Guid.NewGuid().ToString("N");
-                unitKeys[nativeUnit] = unitKey;
-                unitsByKey[unitKey] = nativeUnit;
-            }
-
-            var sample = SampleUnit(nativeUnit, unitKey);
-            if (sample != null)
-            {
-                samples.Add(sample);
-            }
-        }
-
-        return samples;
-    }
-
-    public IReadOnlyList<TrackSample> CaptureTracks()
-    {
-        AssertEngineThread();
-        var trackSamples = new List<TrackSample>();
-        var contacts = Globals._playerTaskforce.PlottingTable.Vehicles
-            .Where(contact => contact.Id >= FirstForeignContactId).ToArray();
-        foreach (var removedContact in contactKeys.Keys.Where(contact => !contacts.Contains(contact)).ToArray())
-        {
-            contactKeys.Remove(removedContact);
-        }
-        foreach (var contact in contacts.Take(MaximumTrackSamples))
-        {
-            // Use the plotting record's lifetime, never its reusable numeric ID or hidden BaseObject.
-            if (!contactKeys.TryGetValue(contact, out var contactKey))
-            {
-                contactKey = Guid.NewGuid().ToString("N");
-                contactKeys[contact] = contactKey;
-            }
-            var detected = contact.DetectedPosition;
-
-            trackSamples.Add(new TrackSample
-            {
-                Key = contactKey,
-                PositionAvailable = detected.HasValue,
-                LatitudeDeg = detected.HasValue ? detected.Value.Item1.Latitude : 0,
-                LongitudeDeg = detected.HasValue ? detected.Value.Item1.Longitude : 0
-            });
-        }
-
-        return trackSamples;
-    }
-
-    public UnitSample Resolve(string key)
-    {
-        AssertEngineThread();
-        return unitsByKey.TryGetValue(key, out var nativeUnit) ? SampleUnit(nativeUnit, key) : null;
-    }
-
-    public bool AppendWaypoint(string key, double latitudeDeg, double longitudeDeg, string label)
-    {
-        string unitKey = key; // Preserve the existing named-argument contract.
-        AssertEngineThread();
-        if (!unitsByKey.TryGetValue(unitKey, out var nativeUnit))
-        {
-            return false;
-        }
-
-        var freshSample = SampleUnit(nativeUnit, unitKey);
-        if (freshSample == null || Provider.Eligibility(freshSample).Availability != NavalCommand.Gateway.Wire.Availability.Executable)
-        {
-            return false;
-        }
-
-        var waypointTask = nativeUnit.SetWaypointTask(new WaypointData
-        {
-            _geoposition = new GeoPosition(latitudeDeg, longitudeDeg, nativeUnit._geoPosition._height),
-            _heightState = WaypointData.WaypointHeightState.Current,
-            _setTelegraph = WaypointTelegraphSetting,
-            _allowFormationManeuver = false,
-            wpName = label
-        });
-        return waypointTask != null && nativeUnit._userRoot.TaskViewModels.Any(taskViewModel => taskViewModel.Task == waypointTask);
-    }
-
-    void InspectRoute(ObjectBase nativeUnit, UnitSample sample)
-    {
-        sample.RouteRestriction = "navigation_context_unverified";
-        var root = nativeUnit._userRoot;
-        if (root == null || root.TaskViewModels.Count > 32)
-        {
-            sample.RouteRestriction = "route_capacity_or_missing_root";
-            return;
-        }
-        // ClearTasks removes every graph child, including tasks absent from UI models.
-        // Require an exact one-to-one graph/model correspondence before editing.
-        var children = root.GetChildNodes().ToArray();
-        var tasks = root.TaskViewModels.Select(view => view.Task).ToArray();
-        if (children.Length != tasks.Length || children.Where((child, index) =>
-            child is not ActionNode action || action.task != tasks[index]).Any())
-        {
-            sample.RouteRestriction = "non_navigation_graph";
-            return;
-        }
-        foreach (var task in tasks)
-        {
-            if (task == null || task.GetType() != typeof(GoToWaypointTask))
-            {
-                sample.RouteRestriction = "non_navigation_task";
-                return;
-            }
-            var point = task.WaypointPosition;
-            sample.Route.Add(new RoutePoint
-            {
-                LatitudeDeg = point.Latitude,
-                LongitudeDeg = point.Longitude,
-                Label = ((GoToWaypointTask)task).wpName.value ?? ""
-            });
-        }
-        sample.RouteInspected = true;
-        // Scope the UI-equivalent mutation to plain surface navigation. Airborne
-        // routing has UI CeaseFire and altitude effects that are not validated here.
-        if (nativeUnit is not Vessel || (nativeUnit.StateMachine?.CurrentState is not VesselStates.Default
-            && nativeUnit.StateMachine?.CurrentState is not VesselStates.PlayerOverride))
-        {
-            sample.RouteRestriction = "surface_navigation_state_required";
-            return;
-        }
-        if (nativeUnit.CurrentOrder.Value?.OrderType != Order.Type.None || nativeUnit._patrolZone != null
-            || nativeUnit._alignmentTasks.Count != 0 || nativeUnit._weaponStatus == ObjectBase.WeaponStatus.Free)
-        {
-            sample.RouteRestriction = "non_navigation_context";
-            return;
-        }
-        if ((tasks.Length > 0 && !nativeUnit._isCurrentWaypointReachable) || tasks.Cast<GoToWaypointTask>().Any(task =>
-            !task._isReachable || task._isAutogenerated || task._waypointsData.Count != 0
-            || task._parentObject.value != null || task._toCurrentPosition.value || task._setCourse.value || task._setTurn.value
-            || task._completionOrder != SeapowerUI.ViewModels.WaypointCompletionOrder.None || task._returnToFormation
-            || task._setWeaponStatus.setWS || task._setEmcon || task._setAirSearchRadars.setRadars
-            || task._setSurfaceSearchRadars.setRadars || task._setActiveSonars.setSonars || task._setTowedSonars.setSonars
-            || task._objectsToVIDList.Count != 0))
-        {
-            sample.RouteRestriction = "special_navigation_task";
-            return;
-        }
-        sample.RouteRestriction = "";
-    }
-
-    public RouteMutation UpdateRoute(string key, double latitudeDeg, double longitudeDeg, string label, RouteMode mode)
-    {
-        AssertEngineThread();
-        var receipt = new RouteMutation();
-        if (mode != RouteMode.ReplaceRoute && mode != RouteMode.AppendWaypoint)
-        {
-            receipt.Reason = "unsupported_route_mode";
-            return receipt;
-        }
-        if (!unitsByKey.TryGetValue(key, out var nativeUnit))
-        {
-            return receipt;
-        }
-        var fresh = SampleUnit(nativeUnit, key);
-        if (fresh == null)
-        {
-            return receipt;
-        }
-        receipt.Before.AddRange(fresh.Route);
-        var eligibility = Provider.RouteEligibility(fresh, mode);
-        if (eligibility.Availability != Availability.Executable)
-        {
-            receipt.Reason = eligibility.Reason;
-            receipt.After.AddRange(fresh.Route);
-            return receipt;
-        }
-        var root = nativeUnit._userRoot;
-        var previousTasks = root.TaskViewModels.Select(view => view.Task).ToArray();
-        try
-        {
-            if (mode == RouteMode.ReplaceRoute)
-            {
-                // Proven to contain only ordinary navigation tasks immediately above.
-                nativeUnit.RemoveWaypoints();
-            }
-            else
-            {
-                // Native insertion is after selection. Select the tail explicitly so
-                // a GUI selection cannot cause an external append in the middle.
-                for (int index = 0; index < root.TaskViewModels.Count; ++index)
-                {
-                    root.TaskViewModels[index].Selected = index == root.TaskViewModels.Count - 1;
-                }
-            }
-            var created = nativeUnit.SetWaypointTask(new WaypointData
-            {
-                _geoposition = new GeoPosition(latitudeDeg, longitudeDeg, nativeUnit._geoPosition._height),
-                _heightState = WaypointData.WaypointHeightState.Current,
-                _setTelegraph = PreserveTelegraphSetting,
-                _allowFormationManeuver = false,
-                wpName = label
-            });
-            var afterTasks = root.TaskViewModels.Select(view => view.Task).ToArray();
-            var sampled = SampleUnit(nativeUnit, key);
-            if (sampled != null)
-            {
-                receipt.After.AddRange(sampled.Route);
-            }
-            bool sequenceVerified = mode == RouteMode.ReplaceRoute
-                ? afterTasks.Length == 1 && afterTasks[0] == created
-                : afterTasks.Length == previousTasks.Length + 1 && afterTasks.Last() == created
-                    && afterTasks.Take(previousTasks.Length).SequenceEqual(previousTasks);
-            receipt.Mutated = created != null && sequenceVerified && sampled?.RouteInspected == true;
-            receipt.OutcomeUnknown = !receipt.Mutated;
-            receipt.Reason = receipt.Mutated ? "native_route_sequence_verified" : "native_route_verification_failed";
-        }
-        catch (Exception exception)
-        {
-            // Native mutation is not transactional. Never report rejection/no effect
-            // after invocation or attempt to reconstruct unrelated native state.
-            receipt.OutcomeUnknown = true;
-            receipt.Reason = "native_route_exception:" + exception.GetType().Name;
-        }
-        return receipt;
+        factionIds.Clear();
+        unitIds.Clear();
+        observationIds.Clear();
+        capabilitySystems.Clear();
+        sourceGame = null;
+        nativeSession = "";
     }
 }

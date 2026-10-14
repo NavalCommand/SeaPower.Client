@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Google.Protobuf;
 using NavalCommand.Gateway.Wire;
@@ -11,6 +12,50 @@ static void Check(bool passed, string description)
         throw new InvalidOperationException(description);
     }
 }
+
+var exactCandidates = new[] { new ClassificationCandidate("vessels/ssn", 14) };
+var unresolvedExact = ClassificationMapping.ResolveCandidates(exactCandidates, false);
+Check(unresolvedExact.Level == ClassificationResolutionLevel.SubCategory && unresolvedExact.Value == 14,
+    "singleton observer candidate remains a subcategory before exact identification");
+var identifiedExact = ClassificationMapping.ResolveCandidates(exactCandidates, true);
+Check(identifiedExact.Level == ClassificationResolutionLevel.TypeId && identifiedExact.TypeId == "vessels/ssn",
+    "identified singleton observer candidate resolves to a canonical type ID");
+var sameCategory = ClassificationMapping.ResolveCandidates(new[]
+{
+    new ClassificationCandidate("vessels/ddg", 7),
+    new ClassificationCandidate("vessels/ffg", 8)
+}, false);
+Check(sameCategory.Level == ClassificationResolutionLevel.Category && sameCategory.Value == 2,
+    "multiple candidates resolve to their common category");
+var sameDimension = ClassificationMapping.ResolveCandidates(new[]
+{
+    new ClassificationCandidate("aircraft/fighter", 0),
+    new ClassificationCandidate("ammunition/weapon", 30)
+}, false);
+Check(sameDimension.Level == ClassificationResolutionLevel.Dimension && sameDimension.Value == 0,
+    "different categories can resolve directly to their common dimension");
+Check(ClassificationMapping.ResolveCandidates(new[]
+{
+    new ClassificationCandidate("vessels/ddg", 7),
+    new ClassificationCandidate("unknown", null)
+}, false).Level == ClassificationResolutionLevel.Unknown,
+    "unmapped observer candidate prevents false consensus");
+Check(ClassificationMapping.ResolveVisualType("Submarine").Level == ClassificationResolutionLevel.SubCategory
+    && ClassificationMapping.ResolveVisualType("Submarine").Value == 33,
+    "aggressive map-symbol fallback emits generic submarine classification");
+Check(ClassificationMapping.ResolveVisualType("Surface").Level == ClassificationResolutionLevel.Category
+    && ClassificationMapping.ResolveVisualType("Surface").Value == 2,
+    "aggressive map-symbol fallback emits generic surface category");
+Check(ClassificationMapping.MapAuthoritativeSubCategory("ammunition/usn_moss", "", "", "Torpedo", Array.Empty<string>()) == 21,
+    "curated MOSS identity remains a semantic decoy");
+Check(ClassificationMapping.MapAuthoritativeSubCategory("ammunition/usn_ssq-53", "", "", "Bomb", Array.Empty<string>()) == 22,
+    "sonobuoy identity remains semantic despite bomb implementation");
+Check(ClassificationMapping.MapAuthoritativeSubCategory("biologic/bio_blue_whale", "BIO", "Whale", "Biologic", Array.Empty<string>()) == 34,
+    "encyclopedia whale type maps to SeaAnimal subcategory");
+Check(ClassificationMapping.MapAuthoritativeSubCategory("biologic/bio_fin_whale", "", "", "Biologic", Array.Empty<string>()) == 34,
+    "curated whale identity maps without relying on display text");
+Check(ClassificationMapping.MapNativeRole("ASuW_LR").SequenceEqual(new[] { PlatformRole.SurfaceWarfare, PlatformRole.Strike }),
+    "native ASuW_LR role maps to its configured platform roles");
 
 var game = new FakeGame();
 var provider = new Provider(game);
@@ -91,7 +136,7 @@ bool wrongThreadRejected = Task.Run(() =>
     }
 }).GetAwaiter().GetResult();
 Check(wrongThreadRejected, "worker cannot access game facade");
-Console.WriteLine("Managed provider: ownership, selected compression, disconnect, expiry, session and thread boundary passed.");
+Console.WriteLine("Managed provider and classification: ownership, observer consensus, symbol fallback, roles, expiry, session and thread boundary passed.");
 return 0;
 
 sealed class FakeGame : IGameFacade

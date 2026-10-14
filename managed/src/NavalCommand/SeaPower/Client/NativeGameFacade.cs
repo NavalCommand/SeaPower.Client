@@ -312,12 +312,13 @@ public sealed class NativeGameFacade : IGameFacade
                 string capability = value.Type + "/" + weapon._sectionName + "/" + ammunition;
                 var equipment = EquipmentState(weapon, capability, value.Id);
                 int readyRounds = weapon.getLoadedAmmoCount(ammunition);
+                int magazineRounds = weapon.getMagazineAmmoCount(ammunition);
                 // Magazine-fed guns use a shared ready-round counter. The
-                // ammunition-specific magazine count is the actual inventory;
-                // readiness still comes from the native per-capability query.
+                // ammunition-specific magazine count is their inventory. Other
+                // systems report rounds loaded directly into that system.
                 int count = weapon is WeaponSystemGun && weapon._vwp?._associatedMagazine != null
-                    ? weapon.getMagazineAmmoCount(ammunition) : readyRounds;
-                if (count < 0)
+                    ? magazineRounds : readyRounds;
+                if (readyRounds < 0 || magazineRounds < 0 || count < 0)
                 {
                     throw new InvalidOperationException("negative_native_ammunition_count");
                 }
@@ -327,7 +328,8 @@ public sealed class NativeGameFacade : IGameFacade
                 };
                 bool engaging = weapon._executingEngageTask;
                 bool selected = weapon._ammoForEngage?._ap?._ammunitionFileName == ammunition;
-                bool unavailable = equipment.OperationalState == 2 || count == 0 || readyRounds == 0 || weapon._isReloading || weapon._isOffline || (engaging && !selected);
+                bool hasAmmunition = readyRounds > 0 || magazineRounds > 0;
+                bool unavailable = equipment.OperationalState == 2 || !hasAmmunition || weapon._isReloading || weapon._isOffline || (engaging && !selected);
                 equipment.OperationalState = unavailable ? 2 : engaging && selected ? 1 : 0;
                 value.Equipment.Add(equipment);
             }

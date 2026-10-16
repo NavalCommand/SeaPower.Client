@@ -10,6 +10,7 @@
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/IGameFacade.cs" Link="IGameFacade.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/PauseOwnership.cs" Link="PauseOwnership.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/ClassificationMapping.cs" Link="ClassificationMapping.cs" />
+    <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/DisplayedContactKinematics.cs" Link="DisplayedContactKinematics.cs" />
     <Compile Include="../../managed/src/NavalCommand/SeaPower/Client/NativeKinematicsMapping.cs" Link="NativeKinematicsMapping.cs" />
     <ProjectReference Include="$(GatewayApiSource)/managed/Gateway.Api.csproj" />
   </ItemGroup>

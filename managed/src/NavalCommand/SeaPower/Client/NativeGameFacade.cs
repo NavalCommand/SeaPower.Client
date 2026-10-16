@@ -469,8 +469,8 @@ public sealed class NativeGameFacade : IGameFacade
             Id = id, Name = "Track " + track.Id, ObserverFaction = FactionId(observer),
             Kinematics = new ObservationKinematics { Position = new ObservedPosition { Partial = partial } }
         };
-        // Whitelist observer estimates only. Never serialize Object/BaseObject
-        // names, faction, position, velocity or class from this privileged wrapper.
+        // Horizontal position is observer estimated. Other kinematics follow the
+        // verified player contact-panel bindings below; classification is separate.
         var estimate = track.PositionEstimate;
         if (estimate.HasValue)
         {
@@ -506,26 +506,42 @@ public sealed class NativeGameFacade : IGameFacade
 
     static void CaptureDisplayedKinematics(Vehicle track, ObservationKinematics kinematics, PartialPosition position)
     {
-        // Sea Power exposes these kinematics to the player before identifying
-        // faction or class. Mirror that presentation independently of classification.
-        // Latitude/longitude still come exclusively from the observer's estimate.
+        // ContactBaseViewModel(Vehicle) binds movement to this vector, not hull
+        // heading/true speed. A zero vector must never trigger a truth fallback.
         ObjectBase native = track.Object;
         if (native == null)
         {
             return;
         }
-        kinematics.HeadingRadians = NativeKinematicsMapping.GeographicHeading(native.Heading.Value, position.LatitudeDegrees);
-        kinematics.SpeedMetersPerSecond = native._velocityInKnots * MetersPerSecondPerKnot;
-        position.ElevationMeters = native.getHeightInMeters();
+        var verticalDisplay = DisplayedContactKinematics.VerticalDisplay.Unavailable;
+        bool hasSpeedDisplay = true;
+        switch (native._type)
+        {
+            case ObjectBase.ObjectType.Submarine:
+            case ObjectBase.ObjectType.Biologic:
+            case ObjectBase.ObjectType.Aircraft:
+            case ObjectBase.ObjectType.Helicopter:
+            case ObjectBase.ObjectType.Missile:
+            case ObjectBase.ObjectType.ASROC:
+            case ObjectBase.ObjectType.RBU:
+            case ObjectBase.ObjectType.Bomb:
+                verticalDisplay = DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth;
+                break;
+            case ObjectBase.ObjectType.Torpedo:
+                verticalDisplay = DisplayedContactKinematics.VerticalDisplay.TorpedoDepth;
+                break;
+            case ObjectBase.ObjectType.Vessel:
+                // The panel shows depth below keel, not vessel elevation.
+                break;
+            default:
+                hasSpeedDisplay = false;
+                break;
+        }
         var velocity = track.UnityVelocityVector;
-        if (velocity.x == 0.0f && velocity.z == 0.0f)
-        {
-            velocity = native.UnityVelocityVector;
-        }
-        if (velocity.x != 0.0f || velocity.z != 0.0f)
-        {
-            kinematics.CourseRadians = NativeKinematicsMapping.GeographicBearing(velocity.x, velocity.z, position.LatitudeDegrees);
-        }
+        double? altitudeFeet = verticalDisplay == DisplayedContactKinematics.VerticalDisplay.Unavailable
+            ? null : native.Altitude.Value;
+        DisplayedContactKinematics.Capture(kinematics, position, true, hasSpeedDisplay,
+            velocity.x, velocity.y, velocity.z, altitudeFeet, verticalDisplay);
     }
 
     static void ApplyClassification(Observation observation, ClassificationResolution resolution)

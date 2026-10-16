@@ -13,6 +13,49 @@ static void Check(bool passed, string description)
     }
 }
 
+// These pure inputs mirror ContactBaseViewModel, independently of class/identity.
+var displayed = new ObservationKinematics();
+var position = new PartialPosition { LatitudeDegrees = 60.0, LongitudeDegrees = 4.0 };
+DisplayedContactKinematics.Capture(displayed, position, true, true, 1.0, 0.5, 1.0, -12.0,
+    DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth);
+Check(Math.Abs(displayed.HeadingRadians - Math.Atan2(0.5, 1.0)) < 1e-12,
+    "contact panel direction preserves geographic correction regardless of identification or dormancy");
+Check(displayed.CourseRadians == displayed.HeadingRadians, "course follows the displayed nonzero movement vector");
+Check(Math.Abs(displayed.SpeedMetersPerSecond - 1.5 * 67.200066) < 1e-9,
+    "speed uses the displayed vector magnitude, including vertical motion");
+Check(Math.Abs(position.ElevationMeters + 3.6576) < 1e-9, "displayed submarine depth becomes signed SI elevation");
+var stationaryContact = new ObservationKinematics();
+var stationaryPosition = new PartialPosition { LatitudeDegrees = 45.0 };
+DisplayedContactKinematics.Capture(stationaryContact, stationaryPosition, true, true, 0, 0, 0, 12,
+    DisplayedContactKinematics.VerticalDisplay.Unavailable);
+Check(stationaryContact.SpeedMetersPerSecond == 0 && stationaryContact.HeadingRadians == 0 && !stationaryContact.HasCourseRadians,
+    "zero vector means displayed zero speed/north heading and unknown physical course, never true velocity fallback");
+Check(!stationaryPosition.HasElevationMeters, "surface depth below keel must not become vessel elevation");
+var noObject = new ObservationKinematics();
+var noObjectPosition = new PartialPosition { LatitudeDegrees = 45.0 };
+DisplayedContactKinematics.Capture(noObject, noObjectPosition, false, true, 100, 100, 100, 100,
+    DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth);
+Check(!noObject.HasHeadingRadians && !noObject.HasCourseRadians && !noObject.HasSpeedMetersPerSecond && !noObjectPosition.HasElevationMeters,
+    "missing native object cannot disclose kinematics despite supplied hidden values");
+var unlocalized = new ObservationKinematics();
+var unlocalizedPosition = new PartialPosition();
+DisplayedContactKinematics.Capture(unlocalized, unlocalizedPosition, true, true, 1, 0, 1, 197,
+    DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth);
+Check(!unlocalized.HasHeadingRadians && !unlocalized.HasCourseRadians && unlocalized.HasSpeedMetersPerSecond,
+    "missing latitude preserves unknown geographic bearing and available scalar speed");
+Check(!unlocalizedPosition.HasLatitudeDegrees && !unlocalizedPosition.HasLongitudeDegrees && unlocalizedPosition.HasElevationMeters,
+    "displayed altitude never fabricates localization");
+var unavailable = new ObservationKinematics();
+var unavailablePosition = new PartialPosition { LatitudeDegrees = 45.0 };
+DisplayedContactKinematics.Capture(unavailable, unavailablePosition, true, false, double.NaN, 0, 1, double.NaN,
+    DisplayedContactKinematics.VerticalDisplay.Unavailable);
+Check(!unavailable.HasHeadingRadians && !unavailable.HasCourseRadians && !unavailable.HasSpeedMetersPerSecond && !unavailablePosition.HasElevationMeters,
+    "unavailable or invalid presentation inputs remain unknown");
+var torpedoPosition = new PartialPosition();
+DisplayedContactKinematics.Capture(new ObservationKinematics(), torpedoPosition, true, true, 0, 0, 0, 12,
+    DisplayedContactKinematics.VerticalDisplay.TorpedoDepth);
+Check(torpedoPosition.ElevationMeters == 0, "torpedo above-water depth is clamped exactly as the player panel");
+
 // Projecting a corrected bearing must recover the native waypoint grid slope.
 foreach (double latitude in new[] { -70.0, -45.0, 0.0, 45.0, 70.0 })
 {
@@ -29,7 +72,7 @@ foreach (double latitude in new[] { -70.0, -45.0, 0.0, 45.0, 70.0 })
     }
 }
 Check(Math.Abs(NativeKinematicsMapping.GeographicHeading(45.0, null) - Math.PI / 4.0) < 1e-12,
-    "unlocalized observations retain the grid bearing without reading hidden latitude");
+    "low-level optional-latitude fallback is a grid bearing; observation export gates missing latitude");
 
 Check(ClassificationMapping.MapPrimaryPlatformRole("AEW&C") == PlatformRole.AirborneEarlyWarning,
     "AEW aircraft has an explicit primary early-warning role");

@@ -13,6 +13,24 @@ static void Check(bool passed, string description)
     }
 }
 
+// Projecting a corrected bearing must recover the native waypoint grid slope.
+foreach (double latitude in new[] { -70.0, -45.0, 0.0, 45.0, 70.0 })
+{
+    foreach (double headingDegrees in new[] { 0.0, 25.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0 })
+    {
+        double gridHeading = headingDegrees * Math.PI / 180.0;
+        double bearing = NativeKinematicsMapping.GeographicHeading(headingDegrees, latitude);
+        double projectedEast = Math.Sin(bearing) / Math.Cos(latitude * Math.PI / 180.0);
+        double projectedNorth = Math.Cos(bearing);
+        double crossProduct = projectedEast * Math.Cos(gridHeading) - projectedNorth * Math.Sin(gridHeading);
+        Check(Math.Abs(crossProduct) < 1e-12, "geographic bearing projects along the native waypoint direction");
+        double course = NativeKinematicsMapping.GeographicBearing(Math.Sin(gridHeading), Math.Cos(gridHeading), latitude);
+        Check(Math.Abs(course - bearing) < 1e-12, "heading and velocity use the same grid conversion");
+    }
+}
+Check(Math.Abs(NativeKinematicsMapping.GeographicHeading(45.0, null) - Math.PI / 4.0) < 1e-12,
+    "unlocalized observations retain the grid bearing without reading hidden latitude");
+
 var exactCandidates = new[] { new ClassificationCandidate("vessels/ssn", 14) };
 var unresolvedExact = ClassificationMapping.ResolveCandidates(exactCandidates, false);
 Check(unresolvedExact.Level == ClassificationResolutionLevel.SubCategory && unresolvedExact.Value == 14,

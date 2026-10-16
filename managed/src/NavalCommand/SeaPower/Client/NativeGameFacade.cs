@@ -368,14 +368,14 @@ public sealed class NativeGameFacade : IGameFacade
             Kinematics = new UnitKinematics
             {
                 Position = Position(unit._geoPosition), SpeedMetersPerSecond = unit._velocityInKnots * MetersPerSecondPerKnot,
-                HeadingRadians = unit.Heading.Value * DegreesToRadians
+                HeadingRadians = NativeKinematicsMapping.GeographicHeading(unit.Heading.Value, unit._geoPosition.Latitude)
             }
         };
         result.Kinematics.Position.ElevationMeters = unit.getHeightInMeters();
         var velocity = unit.UnityVelocityVector;
         if (velocity.x != 0.0f || velocity.z != 0.0f)
         {
-            result.Kinematics.CourseRadians = Math.Atan2(velocity.x, velocity.z);
+            result.Kinematics.CourseRadians = NativeKinematicsMapping.GeographicBearing(velocity.x, velocity.z, result.Kinematics.Position.LatitudeDegrees);
         }
         if (unit is NativeAircraft aircraft)
         {
@@ -514,7 +514,7 @@ public sealed class NativeGameFacade : IGameFacade
         {
             return;
         }
-        kinematics.HeadingRadians = native.Heading.Value * DegreesToRadians;
+        kinematics.HeadingRadians = NativeKinematicsMapping.GeographicHeading(native.Heading.Value, position.LatitudeDegrees);
         kinematics.SpeedMetersPerSecond = native._velocityInKnots * MetersPerSecondPerKnot;
         position.ElevationMeters = native.getHeightInMeters();
         var velocity = track.UnityVelocityVector;
@@ -524,7 +524,7 @@ public sealed class NativeGameFacade : IGameFacade
         }
         if (velocity.x != 0.0f || velocity.z != 0.0f)
         {
-            kinematics.CourseRadians = Math.Atan2(velocity.x, velocity.z);
+            kinematics.CourseRadians = NativeKinematicsMapping.GeographicBearing(velocity.x, velocity.z, position.LatitudeDegrees);
         }
     }
 

@@ -663,6 +663,14 @@ public sealed class NativeGameFacade : IGameFacade
         {
             result.PlatformRoles.Add((int)role);
         }
+        if (definition.PrimaryPlatformRole is PlatformRole primaryRole)
+        {
+            result.PrimaryPlatformRole = (int)primaryRole;
+            if (!result.PlatformRoles.Contains((int)primaryRole))
+            {
+                result.PlatformRoles.Add((int)primaryRole);
+            }
+        }
         foreach (string loadoutName in definition.Loadouts)
         {
             var loadout = new NavalCommand.Gateway.Wire.Loadout

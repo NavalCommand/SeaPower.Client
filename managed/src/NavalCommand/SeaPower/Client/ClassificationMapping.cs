@@ -148,6 +148,37 @@ public static class ClassificationMapping
         Other
     }
 
+    // Adapter interpretation of the native encyclopedia's principal platform type.
+    // Never infer priority from the unordered capabilities or current loadout.
+    public static PlatformRole? MapPrimaryPlatformRole(string nativeTypeFullName)
+    {
+        switch ((nativeTypeFullName ?? "").Trim().ToUpperInvariant())
+        {
+            case "AEW&C": return PlatformRole.AirborneEarlyWarning;
+            case "EW AIRCRAFT":
+            case "EW/TANKER": return PlatformRole.ElectronicWarfare;
+            case "FIGHTER":
+            case "FIGHTER BOMBER":
+            case "INTERCEPTOR":
+            case "VTOL,FIGHTER": return PlatformRole.AirSuperiority;
+            case "ATTACK":
+            case "ATTACK HELICOPTER": return PlatformRole.Strike;
+            case "BOMBER":
+            case "BOMBER,STRATEGIC BOMBER": return PlatformRole.LandAttack;
+            case "ASW AIRCRAFT":
+            case "ASW HELICOPTER": return PlatformRole.AntiSubmarineWarfare;
+            case "MARITIME PATROL,MPA":
+            case "MPA HELICOPTER": return PlatformRole.MaritimePatrol;
+            case "RECON": return PlatformRole.Reconnaissance;
+            case "TANKER": return PlatformRole.AerialRefuelling;
+            case "TRANSPORT":
+            case "VIP TRANSPORT":
+            case "HEAVY LIFT HELICOPTER":
+            case "MEDIUM LIFT HELICOPTER": return PlatformRole.Transport;
+            default: return null;
+        }
+    }
+
     static readonly IReadOnlyDictionary<string, SubCategory> EncyclopediaTypes = CreateEncyclopediaTypes();
 
     static IReadOnlyDictionary<string, SubCategory> CreateEncyclopediaTypes()

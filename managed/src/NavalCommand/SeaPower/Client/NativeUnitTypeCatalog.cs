@@ -12,6 +12,7 @@ internal sealed class NativeUnitTypeDefinition
     public string Id { get; set; }
     public string DisplayName { get; set; }
     public int SubCategory { get; set; }
+    public PlatformRole? PrimaryPlatformRole { get; set; }
     public IReadOnlyList<PlatformRole> PlatformRoles { get; set; }
     public IReadOnlyList<string> Loadouts { get; set; }
     public string[] NativeRoles { get; set; }
@@ -62,6 +63,8 @@ internal sealed class NativeUnitTypeCatalog
                 SubCategory = ClassificationMapping.MapAuthoritativeSubCategory(typeId, "", "", family, Array.Empty<string>()),
                 PlatformRoles = weapon._ap._type == Ammunition.Type.Missile && weapon._ap._airLaunched && weapon._ap._targetType == Ammunition.Target.AAW
                     ? new[] { PlatformRole.AirSuperiority } : Array.Empty<PlatformRole>(),
+                PrimaryPlatformRole = weapon._ap._type == Ammunition.Type.Missile && weapon._ap._airLaunched && weapon._ap._targetType == Ammunition.Target.AAW
+                    ? PlatformRole.AirSuperiority : null,
                 Loadouts = new[] { "empty" },
                 NativeRoles = Array.Empty<string>()
             };
@@ -195,6 +198,7 @@ internal sealed class NativeUnitTypeCatalog
             DisplayName = string.IsNullOrWhiteSpace(displayName) || string.Equals(displayName, "MISSING", StringComparison.OrdinalIgnoreCase)
                 ? null : displayName.Trim(),
             SubCategory = subCategory,
+            PrimaryPlatformRole = ClassificationMapping.MapPrimaryPlatformRole(typeFullName),
             PlatformRoles = mappedRoles,
             Loadouts = loadouts.AsReadOnly(),
             NativeRoles = nativeRoles

@@ -31,6 +31,15 @@ foreach (double latitude in new[] { -70.0, -45.0, 0.0, 45.0, 70.0 })
 Check(Math.Abs(NativeKinematicsMapping.GeographicHeading(45.0, null) - Math.PI / 4.0) < 1e-12,
     "unlocalized observations retain the grid bearing without reading hidden latitude");
 
+Check(ClassificationMapping.MapPrimaryPlatformRole("AEW&C") == PlatformRole.AirborneEarlyWarning,
+    "AEW aircraft has an explicit primary early-warning role");
+Check(ClassificationMapping.MapPrimaryPlatformRole("EW Aircraft") == PlatformRole.ElectronicWarfare,
+    "EW aircraft has an explicit primary electronic-warfare role");
+Check(ClassificationMapping.MapPrimaryPlatformRole("Fighter") == PlatformRole.AirSuperiority,
+    "fighter has an explicit primary air-superiority role");
+Check(ClassificationMapping.MapPrimaryPlatformRole("Unknown") == null,
+    "unrecognized principal type does not invent a primary role");
+
 var exactCandidates = new[] { new ClassificationCandidate("vessels/ssn", 14) };
 var unresolvedExact = ClassificationMapping.ResolveCandidates(exactCandidates, false);
 Check(unresolvedExact.Level == ClassificationResolutionLevel.SubCategory && unresolvedExact.Value == 14,

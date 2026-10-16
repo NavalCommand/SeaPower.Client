@@ -34,6 +34,7 @@ public enum PlatformRole
 public interface IPlatformRoleMappingProvider
 {
     bool TryGetRoles(string typeId, out IReadOnlyCollection<PlatformRole> roles);
+    bool TryGetPrimaryRole(string typeId, out PlatformRole? role);
 }
 
 public interface IAlternativeDisplayNameProvider

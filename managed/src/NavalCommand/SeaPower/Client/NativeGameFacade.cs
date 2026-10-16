@@ -663,7 +663,9 @@ public sealed class NativeGameFacade : IGameFacade
         {
             result.PlatformRoles.Add((int)role);
         }
-        if (definition.PrimaryPlatformRole is PlatformRole primaryRole)
+        PlatformRole? resolvedPrimary = platformRoleMappings.TryGetPrimaryRole(definition.Id, out PlatformRole? configuredPrimary)
+            ? configuredPrimary : definition.PrimaryPlatformRole;
+        if (resolvedPrimary is PlatformRole primaryRole)
         {
             result.PrimaryPlatformRole = (int)primaryRole;
             if (!result.PlatformRoles.Contains((int)primaryRole))

@@ -198,7 +198,7 @@ internal sealed class NativeUnitTypeCatalog
             DisplayName = string.IsNullOrWhiteSpace(displayName) || string.Equals(displayName, "MISSING", StringComparison.OrdinalIgnoreCase)
                 ? null : displayName.Trim(),
             SubCategory = subCategory,
-            PrimaryPlatformRole = ClassificationMapping.MapPrimaryPlatformRole(typeFullName),
+            PrimaryPlatformRole = ClassificationMapping.MapPrimaryPlatformRole(typeFullName, typeAbbreviation),
             PlatformRoles = mappedRoles,
             Loadouts = loadouts.AsReadOnly(),
             NativeRoles = nativeRoles

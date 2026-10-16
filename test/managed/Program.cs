@@ -39,6 +39,12 @@ Check(ClassificationMapping.MapPrimaryPlatformRole("Fighter") == PlatformRole.Ai
     "fighter has an explicit primary air-superiority role");
 Check(ClassificationMapping.MapPrimaryPlatformRole("Unknown") == null,
     "unrecognized principal type does not invent a primary role");
+Check(ClassificationMapping.MapPrimaryPlatformRole("Missile Cruiser", "CG") == PlatformRole.GuidedMissile,
+    "CG encyclopedia classification supplies the guided-missile primary role");
+Check(ClassificationMapping.MapPrimaryPlatformRole("Localized cruiser name", " cg ") == PlatformRole.GuidedMissile,
+    "CG abbreviation resolves independently of a localized full type name");
+Check(ClassificationMapping.MapPrimaryPlatformRole("Cruiser", "CC") == null,
+    "ordinary cruiser does not acquire a guided-missile role");
 
 var exactCandidates = new[] { new ClassificationCandidate("vessels/ssn", 14) };
 var unresolvedExact = ClassificationMapping.ResolveCandidates(exactCandidates, false);

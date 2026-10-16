@@ -27,7 +27,8 @@ public enum PlatformRole
     Transport,
     AerialRefuelling,
     Surveillance,
-    Decoy
+    Decoy,
+    GuidedMissile
 }
 
 public interface IPlatformRoleMappingProvider
@@ -150,10 +151,15 @@ public static class ClassificationMapping
 
     // Adapter interpretation of the native encyclopedia's principal platform type.
     // Never infer priority from the unordered capabilities or current loadout.
-    public static PlatformRole? MapPrimaryPlatformRole(string nativeTypeFullName)
+    public static PlatformRole? MapPrimaryPlatformRole(string nativeTypeFullName, string nativeTypeAbbreviation = "")
     {
+        if (string.Equals(nativeTypeAbbreviation?.Trim(), "CG", StringComparison.OrdinalIgnoreCase))
+        {
+            return PlatformRole.GuidedMissile;
+        }
         switch ((nativeTypeFullName ?? "").Trim().ToUpperInvariant())
         {
+            case "MISSILE CRUISER": return PlatformRole.GuidedMissile;
             case "AEW&C": return PlatformRole.AirborneEarlyWarning;
             case "EW AIRCRAFT":
             case "EW/TANKER": return PlatformRole.ElectronicWarfare;

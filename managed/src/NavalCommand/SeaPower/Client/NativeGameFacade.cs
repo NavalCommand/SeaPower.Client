@@ -31,15 +31,21 @@ public sealed class NativeGameFacade : IGameFacade
     // type IDs on separate units never overwrite their instance associations.
     readonly Dictionary<string, List<BaseSystem>> instanceSystems = new();
     readonly IPlatformRoleMappingProvider platformRoleMappings;
+    readonly IAlternativeDisplayNameProvider alternativeDisplayNames;
+    readonly NativeLocalizationCatalog nativeLocalization = new();
     readonly ClassificationMode classificationMode;
     NativeUnitTypeCatalog unitTypeCatalog;
     GameMain sourceGame;
     string nativeSession = "";
     public bool ApplyingControl { get; private set; }
 
-    public NativeGameFacade(IPlatformRoleMappingProvider roleMappings, ClassificationMode mode)
+    public NativeGameFacade(
+        IPlatformRoleMappingProvider roleMappings,
+        IAlternativeDisplayNameProvider alternativeNames,
+        ClassificationMode mode)
     {
         platformRoleMappings = roleMappings ?? throw new ArgumentNullException(nameof(roleMappings));
+        alternativeDisplayNames = alternativeNames ?? throw new ArgumentNullException(nameof(alternativeNames));
         classificationMode = mode;
     }
 
@@ -212,11 +218,23 @@ public sealed class NativeGameFacade : IGameFacade
     Result EquipmentDefinition(string capability)
     {
         var system = capabilitySystems[capability];
+        var definition = new EquipmentType { Id = capability };
+        string displayName = system is WeaponSystem
+            ? nativeLocalization.ReadAmmunitionDisplayName(GetNativeNameKey(capability))
+            : system.DisplayName?.Value;
+        if (!string.IsNullOrWhiteSpace(displayName))
+        {
+            definition.DisplayName = displayName.Trim();
+        }
+        if (alternativeDisplayNames.TryGetEquipmentAlternativeDisplayName(capability, out string alternativeDisplayName))
+        {
+            definition.AlternativeDisplayName = alternativeDisplayName;
+        }
+
         if (system is not SensorSystem)
         {
-            // Weapon burst costs, target inputs and shared launcher constraints
-            // require a complete source mapping before publishing definitions.
-            return Unavailable();
+            // Unknown weapon behavior stays unadvertised; identity metadata remains useful to observers.
+            return new Result { EquipmentType = definition };
         }
         int mode;
         switch (system._systemType)
@@ -237,19 +255,16 @@ public sealed class NativeGameFacade : IGameFacade
                 mode = 3;
                 break;
             case BaseSystem.SystemType.SensorECM:
-                var jammer = new EquipmentType { Id = capability };
-                jammer.Effects.Add(new Effect { Jamming = new Empty() });
-                jammer.Operations.Add(new EquipmentOperation { AcceptedTargets = 1, Invocation = 1 });
-                return new Result { EquipmentType = jammer };
+                definition.Effects.Add(new Effect { Jamming = new Empty() });
+                definition.Operations.Add(new EquipmentOperation { AcceptedTargets = 1, Invocation = 1 });
+                return new Result { EquipmentType = definition };
             case BaseSystem.SystemType.TowedDecoy:
-                var decoy = new EquipmentType { Id = capability };
-                decoy.Effects.Add(new Effect { Deception = new Empty() });
-                decoy.Operations.Add(new EquipmentOperation { AcceptedTargets = 1, Invocation = 1 });
-                return new Result { EquipmentType = decoy };
+                definition.Effects.Add(new Effect { Deception = new Empty() });
+                definition.Operations.Add(new EquipmentOperation { AcceptedTargets = 1, Invocation = 1 });
+                return new Result { EquipmentType = definition };
             default:
-                return Unavailable();
+                return new Result { EquipmentType = definition };
         }
-        var definition = new EquipmentType { Id = capability };
         definition.Effects.Add(new Effect { Sensing = new Effect.Types.Sensing { Mode = mode } });
         definition.Operations.Add(new EquipmentOperation { AcceptedTargets = 1, Invocation = 1 });
         return new Result { EquipmentType = definition };
@@ -267,9 +282,15 @@ public sealed class NativeGameFacade : IGameFacade
         return value;
     }
 
+    static string GetNativeNameKey(string capability)
+    {
+        int separatorIndex = capability.LastIndexOf('/');
+        return separatorIndex < 0 ? capability : capability.Substring(separatorIndex + 1);
+    }
+
     static Position Position(GeoPosition point)
     {
-        return new Position { LatitudeDegrees = point.Latitude, LongitudeDegrees = point.Longitude, ElevationMeters = point._height };
+        return new Position { LatitudeDegrees = point.Latitude, LongitudeDegrees = point.Longitude, ElevationMeters = Utils.unityHeightToMeter((float)point._height) };
     }
 
     EquipmentInstance EquipmentState(BaseSystem system, string capability, string unitIdentity)
@@ -342,7 +363,7 @@ public sealed class NativeGameFacade : IGameFacade
         NativeUnitTypeDefinition typeDefinition = catalog.GetOrCreate(unit);
         var result = new Unit
         {
-            Id = UnitId(unit), Name = unit.name, Type = typeDefinition.Id,
+            Id = UnitId(unit), Name = unit.Name.Value ?? "", Type = typeDefinition.Id,
             CurrentLoadout = catalog.GetSelectedLoadout(unit), IsDestroyed = unit.IsDestroyed, Faction = FactionId(unit._taskforce),
             Kinematics = new UnitKinematics
             {
@@ -350,6 +371,12 @@ public sealed class NativeGameFacade : IGameFacade
                 HeadingRadians = unit.Heading.Value * DegreesToRadians
             }
         };
+        result.Kinematics.Position.ElevationMeters = unit.getHeightInMeters();
+        var velocity = unit.UnityVelocityVector;
+        if (velocity.x != 0.0f || velocity.z != 0.0f)
+        {
+            result.Kinematics.CourseRadians = Math.Atan2(velocity.x, velocity.z);
+        }
         if (unit is NativeAircraft aircraft)
         {
             result.Aircraft = new Gateway.Wire.Aircraft { Airborne = aircraft._isInFlight && string.IsNullOrEmpty(unit._flightDeckState) };
@@ -360,6 +387,10 @@ public sealed class NativeGameFacade : IGameFacade
         }
         if (unit._obp == null)
         {
+            if (unit is WeaponBase)
+            {
+                return result;
+            }
             throw new InvalidOperationException("native_unit_equipment_unavailable");
         }
         instanceSystems.Add(result.Id, new List<BaseSystem>());
@@ -456,6 +487,7 @@ public sealed class NativeGameFacade : IGameFacade
                 };
             }
         }
+        CaptureDisplayedKinematics(track, result.Kinematics, partial);
         if (track.Side.HasValue && track.Side.Value.Value != null && HasValidatedDetectedSide(track))
         {
             result.ObservedFaction = FactionId(track.Side.Value.Value);
@@ -470,6 +502,30 @@ public sealed class NativeGameFacade : IGameFacade
         // A missing object reference takes the display's non-destroyed branch.
         result.IsDestroyed = track.Object != null && track.Object.IsDestroyed;
         return result;
+    }
+
+    static void CaptureDisplayedKinematics(Vehicle track, ObservationKinematics kinematics, PartialPosition position)
+    {
+        // Sea Power exposes these kinematics to the player before identifying
+        // faction or class. Mirror that presentation independently of classification.
+        // Latitude/longitude still come exclusively from the observer's estimate.
+        ObjectBase native = track.Object;
+        if (native == null)
+        {
+            return;
+        }
+        kinematics.HeadingRadians = native.Heading.Value * DegreesToRadians;
+        kinematics.SpeedMetersPerSecond = native._velocityInKnots * MetersPerSecondPerKnot;
+        position.ElevationMeters = native.getHeightInMeters();
+        var velocity = track.UnityVelocityVector;
+        if (velocity.x == 0.0f && velocity.z == 0.0f)
+        {
+            velocity = native.UnityVelocityVector;
+        }
+        if (velocity.x != 0.0f || velocity.z != 0.0f)
+        {
+            kinematics.CourseRadians = Math.Atan2(velocity.x, velocity.z);
+        }
     }
 
     static void ApplyClassification(Observation observation, ClassificationResolution resolution)
@@ -512,15 +568,27 @@ public sealed class NativeGameFacade : IGameFacade
             return ClassificationResolution.Unknown;
         }
 
+        // ForceID sets an observer candidate bit as well as overrideIdentification.
+        // Resolve those bits directly; Vehicle.Class has a hidden-object fallback.
         ClassInformation information = entityManager.GetComponentData<ClassInformation>(currentState);
-        if (information.isFalse || information.overrideIdentification)
+        if (information.isFalse)
         {
             return ClassificationResolution.Unknown;
         }
 
+        NativeUnitTypeCatalog catalog = GetUnitTypeCatalog();
+        if (track.Identified.Value && track.Class.HasValue)
+        {
+            // Weapons have no UnitIdMap candidate. Resolve the class already reported
+            // as identified by the plotting table, without dereferencing its object.
+            NativeUnitTypeDefinition reportedWeapon = catalog.GetReportedWeaponType(track.Class.Value.Value);
+            if (reportedWeapon != null)
+            {
+                return new ClassificationResolution(ClassificationResolutionLevel.TypeId, reportedWeapon.Id, 0);
+            }
+        }
         var candidates = new List<ClassificationCandidate>();
         var bits = information.Bits;
-        NativeUnitTypeCatalog catalog = GetUnitTypeCatalog();
         for (int wordIndex = 0; wordIndex < bits.Length; ++wordIndex)
         {
             ulong word = bits[wordIndex];
@@ -581,6 +649,14 @@ public sealed class NativeGameFacade : IGameFacade
     NavalCommand.Gateway.Wire.UnitType CaptureUnitType(NativeUnitTypeDefinition definition)
     {
         var result = new NavalCommand.Gateway.Wire.UnitType { Id = definition.Id, SubCategory = definition.SubCategory };
+        if (!string.IsNullOrWhiteSpace(definition.DisplayName))
+        {
+            result.DisplayName = definition.DisplayName;
+        }
+        if (alternativeDisplayNames.TryGetUnitAlternativeDisplayName(definition.Id, out string alternativeDisplayName))
+        {
+            result.AlternativeDisplayName = alternativeDisplayName;
+        }
         IReadOnlyCollection<PlatformRole> roles = platformRoleMappings.TryGetRoles(definition.Id, out var configuredRoles)
             ? configuredRoles : definition.PlatformRoles;
         foreach (PlatformRole role in roles)
@@ -589,10 +665,16 @@ public sealed class NativeGameFacade : IGameFacade
         }
         foreach (string loadoutName in definition.Loadouts)
         {
-            result.Loadouts.Add(new NavalCommand.Gateway.Wire.Loadout
+            var loadout = new NavalCommand.Gateway.Wire.Loadout
             {
                 Id = NativeUnitTypeCatalog.LoadoutId(definition.Id, loadoutName)
-            });
+            };
+            string loadoutDisplayName = nativeLocalization.ReadLoadoutDisplayName(loadoutName);
+            if (!string.IsNullOrWhiteSpace(loadoutDisplayName))
+            {
+                loadout.DisplayName = loadoutDisplayName;
+            }
+            result.Loadouts.Add(loadout);
         }
         return result;
     }
@@ -601,7 +683,19 @@ public sealed class NativeGameFacade : IGameFacade
     {
         AssertEngineThread();
         var factions = Singleton<TaskforceManager>.Instance._taskForces.Where(faction => faction != null).ToArray();
-        var units = factions.SelectMany(faction => faction._taskforceUnits).Where(unit => unit != null).Distinct().ToArray();
+        IEnumerable<ObjectBase> nativeObjects = factions.SelectMany(faction => faction._taskforceUnits);
+        if (Singleton<ObjectsManager>.InstanceExists())
+        {
+            // The weapon-only list explicitly excludes sonobuoys and noisemakers.
+            nativeObjects = nativeObjects.Concat(Singleton<ObjectsManager>.Instance._listOfAllObjects.OfType<WeaponBase>());
+        }
+        var units = nativeObjects
+            .Where(unit => unit != null && unit._taskforce != null && !unit.Disabled)
+            // DecoySystem creates this attached equipment object even while stowed.
+            // Vehicle.IsVisible also excludes towed decoys from the native tactical map.
+            .Where(unit => unit is not Noisemaker noisemaker || !noisemaker._isTowedDecoy)
+            .Distinct()
+            .ToArray();
         var publication = new Publication { Session = session, Revision = revision, CapturedAtSeconds = GameTime.missionElapsedTime };
         capabilitySystems.Clear();
         instanceSystems.Clear();

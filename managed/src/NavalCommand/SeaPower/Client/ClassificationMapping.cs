@@ -35,6 +35,12 @@ public interface IPlatformRoleMappingProvider
     bool TryGetRoles(string typeId, out IReadOnlyCollection<PlatformRole> roles);
 }
 
+public interface IAlternativeDisplayNameProvider
+{
+    bool TryGetUnitAlternativeDisplayName(string typeId, out string displayName);
+    bool TryGetEquipmentAlternativeDisplayName(string typeId, out string displayName);
+}
+
 public enum ClassificationResolutionLevel
 {
     Unknown,
@@ -261,6 +267,8 @@ public static class ClassificationMapping
                 return (int)SubCategory.Missile;
             case "Torpedo":
                 return (int)SubCategory.Torpedo;
+            case "Sonobuoy":
+                return (int)SubCategory.Sonobuoy;
             case "Noisemaker":
                 return (int)SubCategory.Noisemaker;
             case "Biologic":

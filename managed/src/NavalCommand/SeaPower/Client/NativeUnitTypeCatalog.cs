@@ -10,6 +10,7 @@ namespace NavalCommand.SeaPower.Client;
 internal sealed class NativeUnitTypeDefinition
 {
     public string Id { get; set; }
+    public string DisplayName { get; set; }
     public int SubCategory { get; set; }
     public IReadOnlyList<PlatformRole> PlatformRoles { get; set; }
     public IReadOnlyList<string> Loadouts { get; set; }
@@ -18,9 +19,7 @@ internal sealed class NativeUnitTypeDefinition
 
 internal sealed class NativeUnitTypeCatalog
 {
-    const BindingFlags PublicStatic = BindingFlags.Public | BindingFlags.Static;
     const BindingFlags PublicInstance = BindingFlags.Public | BindingFlags.Instance;
-    static readonly Assembly GameAssembly = typeof(GameMain).Assembly;
     readonly Dictionary<string, NativeUnitTypeDefinition> unitTypes = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<int, NativeUnitTypeDefinition> candidates = new();
     readonly FieldInfo loadoutVariantField;
@@ -35,6 +34,10 @@ internal sealed class NativeUnitTypeCatalog
 
     public NativeUnitTypeDefinition GetOrCreate(ObjectBase unit)
     {
+        if (unit is WeaponBase weapon && weapon._ap != null)
+        {
+            return GetOrCreateWeapon(weapon);
+        }
         string typeId = GetTypeId(unit._obp);
         if (unitTypes.TryGetValue(typeId, out NativeUnitTypeDefinition definition))
         {
@@ -45,15 +48,47 @@ internal sealed class NativeUnitTypeCatalog
         return definition;
     }
 
+    NativeUnitTypeDefinition GetOrCreateWeapon(WeaponBase weapon)
+    {
+        string typeId = ClassificationMapping.CreateTypeId("ammunition", weapon._ap._ammunitionFileName);
+        if (!unitTypes.TryGetValue(typeId, out NativeUnitTypeDefinition definition))
+        {
+            string family = weapon._ap._subType == Ammunition.Type.Sonobuoy
+                ? "Sonobuoy" : weapon._ap._type.ToString();
+            definition = new NativeUnitTypeDefinition
+            {
+                Id = typeId,
+                DisplayName = weapon._ap._displayedName,
+                SubCategory = ClassificationMapping.MapAuthoritativeSubCategory(typeId, "", "", family, Array.Empty<string>()),
+                PlatformRoles = weapon._ap._type == Ammunition.Type.Missile && weapon._ap._airLaunched && weapon._ap._targetType == Ammunition.Target.AAW
+                    ? new[] { PlatformRole.AirSuperiority } : Array.Empty<PlatformRole>(),
+                Loadouts = new[] { "empty" },
+                NativeRoles = Array.Empty<string>()
+            };
+            unitTypes[typeId] = definition;
+        }
+        return definition;
+    }
+
     public NativeUnitTypeDefinition GetCandidate(int candidateId)
     {
         return candidates.TryGetValue(candidateId, out NativeUnitTypeDefinition definition) ? definition : null;
     }
 
+    public NativeUnitTypeDefinition GetReportedWeaponType(string reportedClass)
+    {
+        string typeId = ClassificationMapping.CreateTypeId("ammunition", reportedClass);
+        return unitTypes.TryGetValue(typeId, out NativeUnitTypeDefinition definition) ? definition : null;
+    }
+
     public string GetSelectedLoadout(ObjectBase unit)
     {
-        string typeId = GetTypeId(unit._obp);
         NativeUnitTypeDefinition definition = GetOrCreate(unit);
+        string typeId = definition.Id;
+        if (unit is WeaponBase)
+        {
+            return LoadoutId(typeId, "empty");
+        }
         object selected = loadoutVariantField?.GetValue(unit._obp);
         string selectedName = selected as string;
         if (!string.IsNullOrWhiteSpace(selectedName) && definition.Loadouts.Any(name => string.Equals(name, selectedName, StringComparison.OrdinalIgnoreCase)))
@@ -88,11 +123,9 @@ internal sealed class NativeUnitTypeCatalog
 
     void ReadNativeCatalog()
     {
-        Type metadataProviderType = GameAssembly.GetType("SeaPower.UnitMetadataProvider", false)
-            ?? GameAssembly.GetTypes().FirstOrDefault(type => type.Name == "UnitMetadataProvider");
-        FieldInfo unitDataField = metadataProviderType?.GetField("UnitData", PublicStatic);
-        FieldInfo unitIdMapField = metadataProviderType?.GetField("UnitIdMap", PublicStatic);
-        if (unitDataField?.GetValue(null) is IDictionary unitData)
+        // These are instance properties in the installed game, not static fields.
+        UnitMetadataProvider metadata = Singleton<UnitMetadataProvider>.Instance;
+        if (metadata.UnitData is IDictionary unitData)
         {
             foreach (DictionaryEntry entry in unitData)
             {
@@ -112,7 +145,7 @@ internal sealed class NativeUnitTypeCatalog
             }
         }
 
-        if (unitIdMapField?.GetValue(null) is IDictionary unitIdMap)
+        if (metadata.UnitIdMap is IDictionary unitIdMap)
         {
             foreach (DictionaryEntry entry in unitIdMap)
             {
@@ -142,6 +175,9 @@ internal sealed class NativeUnitTypeCatalog
 
     NativeUnitTypeDefinition ReadDefinition(object parameters, string typeId, IReadOnlyList<string> loadoutNames)
     {
+        // Catalogue entries use SimpleObjectParameters.DefaultName; instantiated
+        // ObjectBaseParameters store the corresponding value in _defaultName.
+        string displayName = ReadString(parameters, "DefaultName", ReadString(parameters, "_defaultName"));
         string[] nativeRoles = ReadSequence(parameters, "_unitRoles").ToArray();
         string typeAbbreviation = ReadString(parameters, "_typeAbbr");
         string typeFullName = ReadString(parameters, "_typeFullName");
@@ -156,6 +192,8 @@ internal sealed class NativeUnitTypeCatalog
         return new NativeUnitTypeDefinition
         {
             Id = typeId,
+            DisplayName = string.IsNullOrWhiteSpace(displayName) || string.Equals(displayName, "MISSING", StringComparison.OrdinalIgnoreCase)
+                ? null : displayName.Trim(),
             SubCategory = subCategory,
             PlatformRoles = mappedRoles,
             Loadouts = loadouts.AsReadOnly(),

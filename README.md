@@ -20,6 +20,11 @@ Contact direction and speed follow the native contact panel's observer `Vehicle`
 movement vector, including TMA adjustments. No true-velocity fallback is made for
 zero vectors. Zero speed remains known; physical course is unknown for a zero
 horizontal vector. Geographic heading/course require an observer latitude.
+Observation `Heading` is the player-reported track heading, converted to a
+geographic bearing. It is not verified bow/nose orientation. Nonzero horizontal
+motion supplies `CourseOverGround` from the same source; these fields are not
+independent measurements. At zero velocity the reported heading remains known
+north, as in the panel. Authoritative unit heading still means body orientation.
 Altitude/depth follow native panel bindings only for the families that display
 those values. Surface depth below keel is not exported as vessel elevation.
 Missing object references and unavailable fields remain unknown. Classification

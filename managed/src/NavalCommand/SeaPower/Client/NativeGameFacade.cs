@@ -508,6 +508,8 @@ public sealed class NativeGameFacade : IGameFacade
     {
         // ContactBaseViewModel(Vehicle) binds movement to this vector, not hull
         // heading/true speed. A zero vector must never trigger a truth fallback.
+        // Observation Heading is that reported track direction, not Unit body orientation.
+        // Identification and dormancy must not suppress these player-visible bindings.
         ObjectBase native = track.Object;
         if (native == null)
         {

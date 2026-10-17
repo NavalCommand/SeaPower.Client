@@ -32,7 +32,9 @@ internal static class DisplayedContactKinematics
             }
             if (position.HasLatitudeDegrees)
             {
-                // The panel calls this heading, but computes it from the movement vector.
+                // Observation heading preserves the panel's reported track heading, derived from movement.
+                // It does not establish body orientation. Heading and course share this source and
+                // must not be interpreted as independent measurements by downstream controllers.
                 // atan2(0, 0) displays north; a zero vector supplies no physical course.
                 target.HeadingRadians = NativeKinematicsMapping.GeographicBearing(east, north, position.LatitudeDegrees);
                 if (east != 0.0 || north != 0.0)

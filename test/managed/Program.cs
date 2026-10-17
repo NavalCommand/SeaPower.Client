@@ -14,6 +14,13 @@ static void Check(bool passed, string description)
 }
 
 // These pure inputs mirror ContactBaseViewModel, independently of class/identity.
+// This fixture has deliberately different body orientation/true speed; neither
+// is an input to the contact mapper. Only the reported vector is observable here.
+var authoritativeKinematics = new UnitKinematics
+{
+    HeadingRadians = Math.PI,
+    SpeedMetersPerSecond = 200.0
+};
 var displayed = new ObservationKinematics();
 var position = new PartialPosition { LatitudeDegrees = 60.0, LongitudeDegrees = 4.0 };
 DisplayedContactKinematics.Capture(displayed, position, true, true, 1.0, 0.5, 1.0, -12.0,
@@ -21,16 +28,75 @@ DisplayedContactKinematics.Capture(displayed, position, true, true, 1.0, 0.5, 1.
 Check(Math.Abs(displayed.HeadingRadians - Math.Atan2(0.5, 1.0)) < 1e-12,
     "contact panel direction preserves geographic correction regardless of identification or dormancy");
 Check(displayed.CourseRadians == displayed.HeadingRadians, "course follows the displayed nonzero movement vector");
+Check(displayed.HasHeadingRadians && displayed.HasCourseRadians && displayed.HasSpeedMetersPerSecond,
+    "nonzero track vector provides reported heading, movement course and displayed speed");
+Check(displayed.HeadingRadians != authoritativeKinematics.HeadingRadians
+    && displayed.SpeedMetersPerSecond != authoritativeKinematics.SpeedMetersPerSecond,
+    "reported track direction and speed need not equal authoritative body orientation or true speed");
 Check(Math.Abs(displayed.SpeedMetersPerSecond - 1.5 * 67.200066) < 1e-9,
     "speed uses the displayed vector magnitude, including vertical motion");
 Check(Math.Abs(position.ElevationMeters + 3.6576) < 1e-9, "displayed submarine depth becomes signed SI elevation");
+
+// Classification belongs to the observation, not the kinematic mapping inputs.
+// Dormancy likewise has no mapper input: a dormant snapshot retains its reported
+// vector. These are mapping/serialization regressions, not execution of native UI gates.
+foreach (string identification in new[] { "unidentified", "partial", "exact" })
+{
+    var contactPosition = new PartialPosition { LatitudeDegrees = 60.0 };
+    var contact = new Observation
+    {
+        Kinematics = new ObservationKinematics { Position = new ObservedPosition { Partial = contactPosition } }
+    };
+    if (identification == "partial")
+    {
+        contact.Category = 2;
+    }
+    else if (identification == "exact")
+    {
+        contact.Type = "vessels/reported-type";
+    }
+    var originalResolution = contact.TypeResolutionCase;
+    DisplayedContactKinematics.Capture(contact.Kinematics, contactPosition, true, true, 1.0, 0.5, 1.0, -12.0,
+        DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth);
+    var activeKinematics = contact.Kinematics.Clone();
+
+    // After detection is lost the fixture retains the last observer vector,
+    // while the hidden platform turns/stops. Never refresh the track from truth.
+    var hiddenAfterDetectionLoss = new UnitKinematics { HeadingRadians = -Math.PI / 2.0, SpeedMetersPerSecond = 0.0 };
+    contact.Kinematics = new ObservationKinematics { Position = new ObservedPosition { Partial = contactPosition } };
+    DisplayedContactKinematics.Capture(contact.Kinematics, contactPosition, true, true, 1.0, 0.5, 1.0, -12.0,
+        DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth);
+    var retainedKinematics = contact.Kinematics.Clone();
+    foreach (var snapshot in new[] { activeKinematics, retainedKinematics })
+    {
+        contact.Kinematics = snapshot;
+        var roundTrip = Observation.Parser.ParseFrom(contact.ToByteArray());
+        Check(roundTrip.Kinematics.HasHeadingRadians && roundTrip.Kinematics.HasSpeedMetersPerSecond
+            && roundTrip.Kinematics.HasCourseRadians, identification + " retains active/dormant kinematic availability");
+        Check(roundTrip.Kinematics.HeadingRadians == displayed.HeadingRadians
+            && roundTrip.Kinematics.CourseRadians == displayed.CourseRadians
+            && roundTrip.Kinematics.SpeedMetersPerSecond == displayed.SpeedMetersPerSecond,
+            identification + " preserves the same reported vector without a truth refresh");
+        Check(roundTrip.TypeResolutionCase == originalResolution, identification + " retains independent classification");
+    }
+    Check(retainedKinematics.HeadingRadians != hiddenAfterDetectionLoss.HeadingRadians
+        && retainedKinematics.SpeedMetersPerSecond != hiddenAfterDetectionLoss.SpeedMetersPerSecond,
+        identification + " retains the dormant report rather than the changed hidden platform state");
+}
 var stationaryContact = new ObservationKinematics();
 var stationaryPosition = new PartialPosition { LatitudeDegrees = 45.0 };
 DisplayedContactKinematics.Capture(stationaryContact, stationaryPosition, true, true, 0, 0, 0, 12,
     DisplayedContactKinematics.VerticalDisplay.Unavailable);
-Check(stationaryContact.SpeedMetersPerSecond == 0 && stationaryContact.HeadingRadians == 0 && !stationaryContact.HasCourseRadians,
+Check(stationaryContact.HasSpeedMetersPerSecond && stationaryContact.SpeedMetersPerSecond == 0
+    && stationaryContact.HasHeadingRadians && stationaryContact.HeadingRadians == 0 && !stationaryContact.HasCourseRadians,
     "zero vector means displayed zero speed/north heading and unknown physical course, never true velocity fallback");
 Check(!stationaryPosition.HasElevationMeters, "surface depth below keel must not become vessel elevation");
+var verticalContact = new ObservationKinematics();
+DisplayedContactKinematics.Capture(verticalContact, stationaryPosition, true, true, 0, 1, 0, null,
+    DisplayedContactKinematics.VerticalDisplay.Unavailable);
+Check(verticalContact.HasHeadingRadians && verticalContact.HeadingRadians == 0
+    && !verticalContact.HasCourseRadians && verticalContact.SpeedMetersPerSecond == 67.200066,
+    "vertical-only motion preserves reported north heading and displayed speed without a horizontal course");
 var noObject = new ObservationKinematics();
 var noObjectPosition = new PartialPosition { LatitudeDegrees = 45.0 };
 DisplayedContactKinematics.Capture(noObject, noObjectPosition, false, true, 100, 100, 100, 100,
@@ -51,6 +117,25 @@ DisplayedContactKinematics.Capture(unavailable, unavailablePosition, true, false
     DisplayedContactKinematics.VerticalDisplay.Unavailable);
 Check(!unavailable.HasHeadingRadians && !unavailable.HasCourseRadians && !unavailable.HasSpeedMetersPerSecond && !unavailablePosition.HasElevationMeters,
     "unavailable or invalid presentation inputs remain unknown");
+foreach (double invalidComponent in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+{
+    foreach (int component in new[] { 0, 1, 2 })
+    {
+        var invalid = new ObservationKinematics();
+        DisplayedContactKinematics.Capture(invalid, new PartialPosition { LatitudeDegrees = 45.0 }, true, true,
+            component == 0 ? invalidComponent : 1.0,
+            component == 1 ? invalidComponent : 0.0,
+            component == 2 ? invalidComponent : 1.0,
+            null, DisplayedContactKinematics.VerticalDisplay.Unavailable);
+        Check(!invalid.HasHeadingRadians && !invalid.HasCourseRadians && !invalid.HasSpeedMetersPerSecond,
+            "any nonfinite vector component preserves Unknown kinematics");
+    }
+}
+var noSpeedDisplay = new ObservationKinematics();
+DisplayedContactKinematics.Capture(noSpeedDisplay, new PartialPosition { LatitudeDegrees = 45.0 }, true, false,
+    1, 0, 1, null, DisplayedContactKinematics.VerticalDisplay.Unavailable);
+Check(noSpeedDisplay.HasHeadingRadians && noSpeedDisplay.HasCourseRadians && !noSpeedDisplay.HasSpeedMetersPerSecond,
+    "missing speed presentation preserves independent heading/course availability");
 var torpedoPosition = new PartialPosition();
 DisplayedContactKinematics.Capture(new ObservationKinematics(), torpedoPosition, true, true, 0, 0, 0, 12,
     DisplayedContactKinematics.VerticalDisplay.TorpedoDepth);

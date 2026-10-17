@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Google.Protobuf;
 using NavalCommand.Gateway.Wire;
@@ -11,6 +12,211 @@ static void Check(bool passed, string description)
         throw new InvalidOperationException(description);
     }
 }
+
+// These pure inputs mirror ContactBaseViewModel, independently of class/identity.
+// This fixture has deliberately different body orientation/true speed; neither
+// is an input to the contact mapper. Only the reported vector is observable here.
+var authoritativeKinematics = new UnitKinematics
+{
+    HeadingRadians = Math.PI,
+    SpeedMetersPerSecond = 200.0
+};
+var displayed = new ObservationKinematics();
+var position = new PartialPosition { LatitudeDegrees = 60.0, LongitudeDegrees = 4.0 };
+DisplayedContactKinematics.Capture(displayed, position, true, true, 1.0, 0.5, 1.0, -12.0,
+    DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth);
+Check(Math.Abs(displayed.HeadingRadians - Math.Atan2(0.5, 1.0)) < 1e-12,
+    "contact panel direction preserves geographic correction regardless of identification or dormancy");
+Check(displayed.CourseRadians == displayed.HeadingRadians, "course follows the displayed nonzero movement vector");
+Check(displayed.HasHeadingRadians && displayed.HasCourseRadians && displayed.HasSpeedMetersPerSecond,
+    "nonzero track vector provides reported heading, movement course and displayed speed");
+Check(displayed.HeadingRadians != authoritativeKinematics.HeadingRadians
+    && displayed.SpeedMetersPerSecond != authoritativeKinematics.SpeedMetersPerSecond,
+    "reported track direction and speed need not equal authoritative body orientation or true speed");
+Check(Math.Abs(displayed.SpeedMetersPerSecond - 1.5 * 67.200066) < 1e-9,
+    "speed uses the displayed vector magnitude, including vertical motion");
+Check(Math.Abs(position.ElevationMeters + 3.6576) < 1e-9, "displayed submarine depth becomes signed SI elevation");
+
+// Classification belongs to the observation, not the kinematic mapping inputs.
+// Dormancy likewise has no mapper input: a dormant snapshot retains its reported
+// vector. These are mapping/serialization regressions, not execution of native UI gates.
+foreach (string identification in new[] { "unidentified", "partial", "exact" })
+{
+    var contactPosition = new PartialPosition { LatitudeDegrees = 60.0 };
+    var contact = new Observation
+    {
+        Kinematics = new ObservationKinematics { Position = new ObservedPosition { Partial = contactPosition } }
+    };
+    if (identification == "partial")
+    {
+        contact.Category = 2;
+    }
+    else if (identification == "exact")
+    {
+        contact.Type = "vessels/reported-type";
+    }
+    var originalResolution = contact.TypeResolutionCase;
+    DisplayedContactKinematics.Capture(contact.Kinematics, contactPosition, true, true, 1.0, 0.5, 1.0, -12.0,
+        DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth);
+    var activeKinematics = contact.Kinematics.Clone();
+
+    // After detection is lost the fixture retains the last observer vector,
+    // while the hidden platform turns/stops. Never refresh the track from truth.
+    var hiddenAfterDetectionLoss = new UnitKinematics { HeadingRadians = -Math.PI / 2.0, SpeedMetersPerSecond = 0.0 };
+    contact.Kinematics = new ObservationKinematics { Position = new ObservedPosition { Partial = contactPosition } };
+    DisplayedContactKinematics.Capture(contact.Kinematics, contactPosition, true, true, 1.0, 0.5, 1.0, -12.0,
+        DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth);
+    var retainedKinematics = contact.Kinematics.Clone();
+    foreach (var snapshot in new[] { activeKinematics, retainedKinematics })
+    {
+        contact.Kinematics = snapshot;
+        var roundTrip = Observation.Parser.ParseFrom(contact.ToByteArray());
+        Check(roundTrip.Kinematics.HasHeadingRadians && roundTrip.Kinematics.HasSpeedMetersPerSecond
+            && roundTrip.Kinematics.HasCourseRadians, identification + " retains active/dormant kinematic availability");
+        Check(roundTrip.Kinematics.HeadingRadians == displayed.HeadingRadians
+            && roundTrip.Kinematics.CourseRadians == displayed.CourseRadians
+            && roundTrip.Kinematics.SpeedMetersPerSecond == displayed.SpeedMetersPerSecond,
+            identification + " preserves the same reported vector without a truth refresh");
+        Check(roundTrip.TypeResolutionCase == originalResolution, identification + " retains independent classification");
+    }
+    Check(retainedKinematics.HeadingRadians != hiddenAfterDetectionLoss.HeadingRadians
+        && retainedKinematics.SpeedMetersPerSecond != hiddenAfterDetectionLoss.SpeedMetersPerSecond,
+        identification + " retains the dormant report rather than the changed hidden platform state");
+}
+var stationaryContact = new ObservationKinematics();
+var stationaryPosition = new PartialPosition { LatitudeDegrees = 45.0 };
+DisplayedContactKinematics.Capture(stationaryContact, stationaryPosition, true, true, 0, 0, 0, 12,
+    DisplayedContactKinematics.VerticalDisplay.Unavailable);
+Check(stationaryContact.HasSpeedMetersPerSecond && stationaryContact.SpeedMetersPerSecond == 0
+    && stationaryContact.HasHeadingRadians && stationaryContact.HeadingRadians == 0 && !stationaryContact.HasCourseRadians,
+    "zero vector means displayed zero speed/north heading and unknown physical course, never true velocity fallback");
+Check(!stationaryPosition.HasElevationMeters, "surface depth below keel must not become vessel elevation");
+var verticalContact = new ObservationKinematics();
+DisplayedContactKinematics.Capture(verticalContact, stationaryPosition, true, true, 0, 1, 0, null,
+    DisplayedContactKinematics.VerticalDisplay.Unavailable);
+Check(verticalContact.HasHeadingRadians && verticalContact.HeadingRadians == 0
+    && !verticalContact.HasCourseRadians && verticalContact.SpeedMetersPerSecond == 67.200066,
+    "vertical-only motion preserves reported north heading and displayed speed without a horizontal course");
+var noObject = new ObservationKinematics();
+var noObjectPosition = new PartialPosition { LatitudeDegrees = 45.0 };
+DisplayedContactKinematics.Capture(noObject, noObjectPosition, false, true, 100, 100, 100, 100,
+    DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth);
+Check(!noObject.HasHeadingRadians && !noObject.HasCourseRadians && !noObject.HasSpeedMetersPerSecond && !noObjectPosition.HasElevationMeters,
+    "missing native object cannot disclose kinematics despite supplied hidden values");
+var unlocalized = new ObservationKinematics();
+var unlocalizedPosition = new PartialPosition();
+DisplayedContactKinematics.Capture(unlocalized, unlocalizedPosition, true, true, 1, 0, 1, 197,
+    DisplayedContactKinematics.VerticalDisplay.AltitudeOrDepth);
+Check(!unlocalized.HasHeadingRadians && !unlocalized.HasCourseRadians && unlocalized.HasSpeedMetersPerSecond,
+    "missing latitude preserves unknown geographic bearing and available scalar speed");
+Check(!unlocalizedPosition.HasLatitudeDegrees && !unlocalizedPosition.HasLongitudeDegrees && unlocalizedPosition.HasElevationMeters,
+    "displayed altitude never fabricates localization");
+var unavailable = new ObservationKinematics();
+var unavailablePosition = new PartialPosition { LatitudeDegrees = 45.0 };
+DisplayedContactKinematics.Capture(unavailable, unavailablePosition, true, false, double.NaN, 0, 1, double.NaN,
+    DisplayedContactKinematics.VerticalDisplay.Unavailable);
+Check(!unavailable.HasHeadingRadians && !unavailable.HasCourseRadians && !unavailable.HasSpeedMetersPerSecond && !unavailablePosition.HasElevationMeters,
+    "unavailable or invalid presentation inputs remain unknown");
+foreach (double invalidComponent in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+{
+    foreach (int component in new[] { 0, 1, 2 })
+    {
+        var invalid = new ObservationKinematics();
+        DisplayedContactKinematics.Capture(invalid, new PartialPosition { LatitudeDegrees = 45.0 }, true, true,
+            component == 0 ? invalidComponent : 1.0,
+            component == 1 ? invalidComponent : 0.0,
+            component == 2 ? invalidComponent : 1.0,
+            null, DisplayedContactKinematics.VerticalDisplay.Unavailable);
+        Check(!invalid.HasHeadingRadians && !invalid.HasCourseRadians && !invalid.HasSpeedMetersPerSecond,
+            "any nonfinite vector component preserves Unknown kinematics");
+    }
+}
+var noSpeedDisplay = new ObservationKinematics();
+DisplayedContactKinematics.Capture(noSpeedDisplay, new PartialPosition { LatitudeDegrees = 45.0 }, true, false,
+    1, 0, 1, null, DisplayedContactKinematics.VerticalDisplay.Unavailable);
+Check(noSpeedDisplay.HasHeadingRadians && noSpeedDisplay.HasCourseRadians && !noSpeedDisplay.HasSpeedMetersPerSecond,
+    "missing speed presentation preserves independent heading/course availability");
+var torpedoPosition = new PartialPosition();
+DisplayedContactKinematics.Capture(new ObservationKinematics(), torpedoPosition, true, true, 0, 0, 0, 12,
+    DisplayedContactKinematics.VerticalDisplay.TorpedoDepth);
+Check(torpedoPosition.ElevationMeters == 0, "torpedo above-water depth is clamped exactly as the player panel");
+
+// Projecting a corrected bearing must recover the native waypoint grid slope.
+foreach (double latitude in new[] { -70.0, -45.0, 0.0, 45.0, 70.0 })
+{
+    foreach (double headingDegrees in new[] { 0.0, 25.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0 })
+    {
+        double gridHeading = headingDegrees * Math.PI / 180.0;
+        double bearing = NativeKinematicsMapping.GeographicHeading(headingDegrees, latitude);
+        double projectedEast = Math.Sin(bearing) / Math.Cos(latitude * Math.PI / 180.0);
+        double projectedNorth = Math.Cos(bearing);
+        double crossProduct = projectedEast * Math.Cos(gridHeading) - projectedNorth * Math.Sin(gridHeading);
+        Check(Math.Abs(crossProduct) < 1e-12, "geographic bearing projects along the native waypoint direction");
+        double course = NativeKinematicsMapping.GeographicBearing(Math.Sin(gridHeading), Math.Cos(gridHeading), latitude);
+        Check(Math.Abs(course - bearing) < 1e-12, "heading and velocity use the same grid conversion");
+    }
+}
+Check(Math.Abs(NativeKinematicsMapping.GeographicHeading(45.0, null) - Math.PI / 4.0) < 1e-12,
+    "low-level optional-latitude fallback is a grid bearing; observation export gates missing latitude");
+
+Check(ClassificationMapping.MapPrimaryPlatformRole("AEW&C") == PlatformRole.AirborneEarlyWarning,
+    "AEW aircraft has an explicit primary early-warning role");
+Check(ClassificationMapping.MapPrimaryPlatformRole("EW Aircraft") == PlatformRole.ElectronicWarfare,
+    "EW aircraft has an explicit primary electronic-warfare role");
+Check(ClassificationMapping.MapPrimaryPlatformRole("Fighter") == PlatformRole.AirSuperiority,
+    "fighter has an explicit primary air-superiority role");
+Check(ClassificationMapping.MapPrimaryPlatformRole("Unknown") == null,
+    "unrecognized principal type does not invent a primary role");
+Check(ClassificationMapping.MapPrimaryPlatformRole("Missile Cruiser", "CG") == PlatformRole.GuidedMissile,
+    "CG encyclopedia classification supplies the guided-missile primary role");
+Check(ClassificationMapping.MapPrimaryPlatformRole("Localized cruiser name", " cg ") == PlatformRole.GuidedMissile,
+    "CG abbreviation resolves independently of a localized full type name");
+Check(ClassificationMapping.MapPrimaryPlatformRole("Cruiser", "CC") == null,
+    "ordinary cruiser does not acquire a guided-missile role");
+
+var exactCandidates = new[] { new ClassificationCandidate("vessels/ssn", 14) };
+var unresolvedExact = ClassificationMapping.ResolveCandidates(exactCandidates, false);
+Check(unresolvedExact.Level == ClassificationResolutionLevel.SubCategory && unresolvedExact.Value == 14,
+    "singleton observer candidate remains a subcategory before exact identification");
+var identifiedExact = ClassificationMapping.ResolveCandidates(exactCandidates, true);
+Check(identifiedExact.Level == ClassificationResolutionLevel.TypeId && identifiedExact.TypeId == "vessels/ssn",
+    "identified singleton observer candidate resolves to a canonical type ID");
+var sameCategory = ClassificationMapping.ResolveCandidates(new[]
+{
+    new ClassificationCandidate("vessels/ddg", 7),
+    new ClassificationCandidate("vessels/ffg", 8)
+}, false);
+Check(sameCategory.Level == ClassificationResolutionLevel.Category && sameCategory.Value == 2,
+    "multiple candidates resolve to their common category");
+var sameDimension = ClassificationMapping.ResolveCandidates(new[]
+{
+    new ClassificationCandidate("aircraft/fighter", 0),
+    new ClassificationCandidate("ammunition/weapon", 30)
+}, false);
+Check(sameDimension.Level == ClassificationResolutionLevel.Dimension && sameDimension.Value == 0,
+    "different categories can resolve directly to their common dimension");
+Check(ClassificationMapping.ResolveCandidates(new[]
+{
+    new ClassificationCandidate("vessels/ddg", 7),
+    new ClassificationCandidate("unknown", null)
+}, false).Level == ClassificationResolutionLevel.Unknown,
+    "unmapped observer candidate prevents false consensus");
+Check(ClassificationMapping.ResolveVisualType("Submarine").Level == ClassificationResolutionLevel.SubCategory
+    && ClassificationMapping.ResolveVisualType("Submarine").Value == 33,
+    "aggressive map-symbol fallback emits generic submarine classification");
+Check(ClassificationMapping.ResolveVisualType("Surface").Level == ClassificationResolutionLevel.Category
+    && ClassificationMapping.ResolveVisualType("Surface").Value == 2,
+    "aggressive map-symbol fallback emits generic surface category");
+Check(ClassificationMapping.MapAuthoritativeSubCategory("ammunition/usn_moss", "", "", "Torpedo", Array.Empty<string>()) == 21,
+    "curated MOSS identity remains a semantic decoy");
+Check(ClassificationMapping.MapAuthoritativeSubCategory("ammunition/usn_ssq-53", "", "", "Bomb", Array.Empty<string>()) == 22,
+    "sonobuoy identity remains semantic despite bomb implementation");
+Check(ClassificationMapping.MapAuthoritativeSubCategory("biologic/bio_blue_whale", "BIO", "Whale", "Biologic", Array.Empty<string>()) == 34,
+    "encyclopedia whale type maps to SeaAnimal subcategory");
+Check(ClassificationMapping.MapAuthoritativeSubCategory("biologic/bio_fin_whale", "", "", "Biologic", Array.Empty<string>()) == 34,
+    "curated whale identity maps without relying on display text");
+Check(ClassificationMapping.MapNativeRole("ASuW_LR").SequenceEqual(new[] { PlatformRole.SurfaceWarfare, PlatformRole.Strike }),
+    "native ASuW_LR role maps to its configured platform roles");
 
 var game = new FakeGame();
 var provider = new Provider(game);
@@ -91,7 +297,7 @@ bool wrongThreadRejected = Task.Run(() =>
     }
 }).GetAwaiter().GetResult();
 Check(wrongThreadRejected, "worker cannot access game facade");
-Console.WriteLine("Managed provider: ownership, selected compression, disconnect, expiry, session and thread boundary passed.");
+Console.WriteLine("Managed provider and classification: ownership, observer consensus, symbol fallback, roles, expiry, session and thread boundary passed.");
 return 0;
 
 sealed class FakeGame : IGameFacade

@@ -40,6 +40,10 @@
       <HintPath>$(GameManaged)/Unity.Entities.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Unity.Collections">
+      <HintPath>$(GameManaged)/Unity.Collections.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Unity.Mathematics">
       <HintPath>$(GameManaged)/Unity.Mathematics.dll</HintPath>
       <Private>false</Private>
